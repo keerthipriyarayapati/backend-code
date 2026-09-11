@@ -1,0 +1,5 @@
+FORM 16 PART B DEDUCTION DETAILS
+Assessment Year 2024-25
+Gross Compensation: 800,000 INR
+Tax Payable: 50,000 INR
+Total Tax Deducted at Source (TDS): 50,000 INR

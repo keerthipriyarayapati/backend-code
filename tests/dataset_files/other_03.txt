@@ -1,0 +1,4 @@
+CONFERENCE MEETING MINUTES
+Project Alpha Architecture Discussion
+Attendees: Alice, Bob, Charlie
+Decisions made: Migrate microservice to event-driven queue.

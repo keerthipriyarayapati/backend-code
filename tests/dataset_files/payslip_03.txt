@@ -1,0 +1,8 @@
+GLOBAL CORP PAYROLL STATEMENT
+Period: April 2025
+Salary breakdown:
+Base Wage: $4,200
+Bonus & Incentive: $800
+Gross Compensation: $5,000
+Tax Deducted: $500
+Net Disbursement: $4,500

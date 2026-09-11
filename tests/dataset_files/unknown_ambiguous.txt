@@ -1,0 +1,4 @@
+DOCUMENT SUMMARY:
+Total amount: 5000
+Date: 2025-01-01
+Status: Pending review

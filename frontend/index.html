@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loan Document Processing AI — Policy-Driven Upload System</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #22c55e;
+      --warning: #eab308;
+      --danger: #ef4444;
+      --border: #334155;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      padding: 30px 20px;
+      display: flex;
+      justify-content: center;
+    }
+
+    .container {
+      max-width: 960px;
+      width: 100%;
+    }
+
+    header {
+      margin-bottom: 25px;
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .loan-selector-box {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 25px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+
+    .selector-label {
+      font-weight: 700;
+      color: var(--accent);
+      font-size: 1rem;
+    }
+
+    select.loan-dropdown {
+      background: var(--bg-color);
+      color: var(--text-main);
+      border: 1px solid var(--accent);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      min-width: 260px;
+    }
+
+    .checklist-header {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px 12px 0 0;
+      padding: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .checklist-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #ffffff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .checklist-body {
+      background: rgba(15, 23, 42, 0.4);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 12px 12px;
+      padding: 20px;
+      margin-bottom: 25px;
+    }
+
+    .slots-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .slot-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .slot-card.accepted {
+      border-color: var(--success);
+      background-color: rgba(34, 197, 94, 0.05);
+    }
+
+    .slot-card.wrong_document {
+      border-color: var(--danger);
+      background-color: rgba(239, 68, 68, 0.08);
+    }
+
+    .slot-card.duplicate {
+      border-color: var(--warning);
+      background-color: rgba(234, 179, 8, 0.08);
+    }
+
+    .slot-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .slot-name {
+      font-weight: 700;
+      font-size: 1rem;
+      color: #ffffff;
+    }
+
+    .slot-badge {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .badge-req { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+    .badge-opt { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid #0284c7; }
+
+    .accepted-types {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .type-pill {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-family: monospace;
+    }
+
+    .upload-area {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .btn-upload {
+      background: var(--accent);
+      color: #0f172a;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.2s ease;
+    }
+
+    .btn-upload:hover { background: var(--accent-hover); color: white; }
+
+    .btn-remove {
+      background: transparent;
+      color: #f87171;
+      border: 1px solid #ef4444;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-remove:hover { background: rgba(239, 68, 68, 0.2); }
+
+    .status-msg {
+      font-size: 0.8rem;
+      margin-top: 8px;
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
+
+    .status-msg.error {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      border: 1px solid #ef4444;
+      font-weight: 600;
+    }
+
+    .status-msg.success {
+      background: rgba(34, 197, 94, 0.15);
+      color: #4ade80;
+      border: 1px solid #22c55e;
+    }
+
+    .process-bar {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+
+    .btn-process {
+      background: var(--success);
+      color: #0f172a;
+      padding: 12px 28px;
+      border-radius: 8px;
+      font-weight: 800;
+      font-size: 1rem;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-process:disabled {
+      background: var(--border);
+      color: var(--text-muted);
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .btn-process:not(:disabled):hover {
+      background: #16a34a;
+      color: white;
+      box-shadow: 0 0 15px rgba(34, 197, 94, 0.4);
+    }
+
+    .results-section {
+      margin-top: 20px;
+    }
+
+    .section-title {
+      font-size: 1.2rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+      margin-bottom: 15px;
+      color: var(--text-main);
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .spinner {
+      display: none;
+      margin: 20px auto;
+      border: 4px solid var(--border);
+      border-top: 4px solid var(--accent);
+      border-radius: 50%;
+      width: 36px;
+      height: 36px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>LOAN DOCUMENT PROCESSING AI</h1>
+      <p>Policy-Driven Dynamic Document Requirement Upload & Multi-Agent Validation Pipeline</p>
+    </header>
+
+    <!-- STEP 1: SELECT LOAN TYPE -->
+    <div class="loan-selector-box">
+      <div>
+        <div class="selector-label">STEP 1: SELECT LOAN TYPE</div>
+        <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">Selecting loan type dynamically loads required & optional document policies.</div>
+      </div>
+      <select id="loanTypeSelect" class="loan-dropdown" onchange="handleLoanTypeChange()">
+        <option value="home_loan">1. Home Loan</option>
+        <option value="personal_loan" selected>2. Personal Loan</option>
+        <option value="vehicle_loan">3. Car / Vehicle Loan</option>
+        <option value="education_loan">4. Education Loan</option>
+        <option value="business_loan">5. Business Loan</option>
+        <option value="gold_loan">6. Gold Loan</option>
+        <option value="loan_against_property">7. Loan Against Property</option>
+        <option value="agriculture_loan">8. Agriculture / Crop Loan</option>
+        <option value="loan_against_fd">9. Loan Against Fixed Deposit</option>
+        <option value="consumer_durable_loan">10. Consumer Durable Loan</option>
+      </select>
+    </div>
+
+    <!-- STEP 2: DYNAMIC DOCUMENT CHECKLIST SLOTS -->
+    <div id="checklistHeader" class="checklist-header">
+      <div class="checklist-title" id="loanChecklistTitle">DOCUMENT REQUIREMENT CHECKLIST</div>
+      <div id="checklistProgress" style="font-size: 0.85rem; font-weight: 600;">--</div>
+    </div>
+    <div class="checklist-body">
+      <h3 style="font-size: 0.9rem; color: var(--accent); margin-bottom: 12px; text-transform: uppercase;">Required Documents</h3>
+      <div id="requiredSlotsGrid" class="slots-grid"></div>
+
+      <h3 style="font-size: 0.9rem; color: var(--text-muted); margin-top: 20px; margin-bottom: 12px; text-transform: uppercase;">Optional / Supporting Documents</h3>
+      <div id="optionalSlotsGrid" class="slots-grid"></div>
+    </div>
+
+    <!-- PROCESS BAR -->
+    <div class="process-bar">
+      <div>
+        <div id="processStatusTitle" style="font-weight: 700; font-size: 1rem; color: #ffffff;">APPLICATION STATUS: INCOMPLETE</div>
+        <div id="processStatusSub" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">Upload all required documents to enable multi-agent processing.</div>
+      </div>
+      <button id="processBtn" class="btn-process" disabled onclick="processApplication()">Process Loan Application</button>
+    </div>
+
+    <div class="spinner" id="spinner"></div>
+
+    <!-- RESULTS SECTION -->
+    <div class="results-section">
+      <h2 class="section-title">Multi-Agent Loan Processing Results</h2>
+      <div id="resultsList">
+        <p style="color: var(--text-muted); text-align: center; padding: 20px;">No documents processed yet.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentAppId = null;
+    let currentPolicy = null;
+    let currentAppStatus = null;
+
+    async function initSession() {
+      const loanType = document.getElementById('loanTypeSelect').value;
+      try {
+        const res = await fetch('/api/applications', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `loan_type=${loanType}`
+        });
+        const data = await res.json();
+        currentAppId = data.application_id;
+        currentAppStatus = data;
+        await fetchRequirements(loanType);
+      } catch (err) {
+        console.error('Error initializing application session:', err);
+      }
+    }
+
+    async function fetchRequirements(loanType) {
+      try {
+        const res = await fetch(`/api/loan-types/${loanType}/document-requirements`);
+        currentPolicy = await res.json();
+        renderSlots();
+      } catch (err) {
+        console.error('Error fetching document requirements:', err);
+      }
+    }
+
+    async function handleLoanTypeChange() {
+      currentAppId = null;
+      currentAppStatus = null;
+      currentPolicy = null;
+      document.getElementById('requiredSlotsGrid').innerHTML = '';
+      document.getElementById('optionalSlotsGrid').innerHTML = '';
+      document.getElementById('resultsList').innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No documents processed yet.</p>';
+      document.getElementById('processBtn').disabled = true;
+      await initSession();
+    }
+
+    function renderSlots() {
+      if (!currentPolicy || !currentAppStatus) return;
+
+      const reqGrid = document.getElementById('requiredSlotsGrid');
+      const optGrid = document.getElementById('optionalSlotsGrid');
+      reqGrid.innerHTML = '';
+      optGrid.innerHTML = '';
+
+      const slotsMap = {};
+      (currentAppStatus.slots || []).forEach(s => { slotsMap[s.requirement_id] = s; });
+
+      const loanTitle = document.getElementById('loanChecklistTitle');
+      loanTitle.innerText = `${currentPolicy.display_name.toUpperCase()} DOCUMENT CHECKLIST`;
+
+      const reqUploaded = currentAppStatus.uploaded_required_documents_count || 0;
+      const reqTotal = currentAppStatus.required_documents_count || 0;
+      const wrongCount = currentAppStatus.wrong_documents_count || 0;
+      const missingCount = currentAppStatus.missing_required_documents_count || (reqTotal - reqUploaded);
+      const isReady = currentAppStatus.application_status === 'READY_FOR_PROCESSING' || currentAppStatus.application_status === 'COMPLETED';
+
+      const progressText = document.getElementById('checklistProgress');
+      progressText.innerHTML = `Required Satisfied: <strong style="color: ${isReady ? '#4ade80' : '#f87171'}">${reqUploaded} / ${reqTotal} Complete</strong> <span style="font-size: 0.78rem; color: var(--text-muted); margin-left: 8px;">(Valid: ${reqUploaded}, Wrong: ${wrongCount}, Missing: ${missingCount})</span>`;
+
+      // Update Process Bar
+      const processTitle = document.getElementById('processStatusTitle');
+      const processSub = document.getElementById('processStatusSub');
+      const processBtn = document.getElementById('processBtn');
+
+      if (isReady) {
+        processTitle.innerHTML = `<span style="color: #4ade80;">✓ READY FOR PROCESSING</span>`;
+        processSub.innerText = 'All required document slots satisfied. Click to run extraction and validation.';
+        processBtn.disabled = false;
+      } else {
+        processTitle.innerHTML = `<span style="color: #f87171;">⚠️ INCOMPLETE (${missingCount} Required Document${missingCount > 1 ? 's' : ''} Missing / ${wrongCount} Wrong)</span>`;
+        processSub.innerText = 'Upload all mandatory required document slots to continue.';
+        processBtn.disabled = true;
+      }
+
+      // Render Required Slots
+      (currentPolicy.required || []).forEach(req => {
+        const status = slotsMap[req.requirement_id] || {};
+        reqGrid.appendChild(createSlotCard(req, status, true));
+      });
+
+      // Render Optional Slots
+      (currentPolicy.optional || []).forEach(opt => {
+        const status = slotsMap[opt.requirement_id] || {};
+        optGrid.appendChild(createSlotCard(opt, status, false));
+      });
+    }
+
+    function createSlotCard(req, status, isRequired) {
+      const card = document.createElement('div');
+      let statusClass = '';
+
+      if (status.status === 'accepted') statusClass = 'accepted';
+      else if (status.status === 'wrong_document') statusClass = 'wrong_document';
+      else if (status.status === 'duplicate') statusClass = 'duplicate';
+
+      card.className = `slot-card ${statusClass}`;
+
+      // Map raw canonical types to clean human-friendly names
+      const humanTypes = (req.accepted_document_types || []).map(t => {
+        if (t === 'office_id' || t === 'employee_id' || t === 'company_id') return 'Company / Office ID';
+        if (t === 'employment_letter') return 'Employment Letter';
+        if (t === 'employment_certificate') return 'Employment Certificate';
+        if (t === 'employment_proof') return 'Employment Proof';
+        return t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      });
+
+      // Deduplicate human type names
+      const uniqueHumanTypes = [...new Set(humanTypes)];
+      const bulletsHtml = uniqueHumanTypes.map(t => `<div style="font-size: 0.8rem; color: #cbd5e1; margin-top: 2px;">• ${t}</div>`).join('');
+
+      const isEmploymentProof = req.requirement_id.includes('emp_proof') || req.requirement_id.includes('emp_letter') || req.display_name.toLowerCase().includes('employment');
+
+      let statusBadge = `<span style="color: var(--text-muted); font-size: 0.8rem; font-weight: 600;">○ Pending Upload</span>`;
+      if (status.status === 'accepted') {
+        const acceptText = isEmploymentProof ? '✓ Employment document verified' : '✓ Accepted';
+        statusBadge = `<span style="color: #4ade80; font-size: 0.85rem; font-weight: 700;">${acceptText}</span>`;
+      } else if (status.status === 'wrong_document') {
+        statusBadge = `<span style="color: #f87171; font-size: 0.85rem; font-weight: 700;">✕ WRONG DOCUMENT</span>`;
+      } else if (status.status === 'duplicate') {
+        statusBadge = `<span style="color: #fde047; font-size: 0.85rem; font-weight: 700;">⚠️ Duplicate</span>`;
+      }
+
+      let errorMsgHtml = '';
+      if (status.error) {
+        errorMsgHtml = `<div class="status-msg error" style="margin-top: 8px; font-size: 0.8rem; color: #f87171; background: rgba(239,68,68,0.1); padding: 8px; border-radius: 6px; border: 1px solid rgba(239,68,68,0.3);">${status.error}</div>`;
+      }
+
+      let fileInfoHtml = '';
+      if (status.uploaded_filename) {
+        const rawDet = status.detected_document_type || 'unknown';
+        const detLabel = rawDet.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        const conf = status.confidence ? `(${(status.confidence * 100).toFixed(0)}%)` : '';
+        const detColor = status.status === 'wrong_document' ? '#f87171' : 'var(--accent)';
+        const docIdParam = status.uploaded_document_id || '';
+        const linksHtml = docIdParam ? `
+          <div style="display: flex; gap: 8px; margin-top: 6px;">
+            <a href="/applications/${currentAppId}/documents/${docIdParam}/view" target="_blank" style="color: #38bdf8; font-size: 0.75rem; text-decoration: none; font-weight: 600; background: rgba(56,189,248,0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.3);">👁️ View</a>
+            <a href="/applications/${currentAppId}/documents/${docIdParam}/download" style="color: #4ade80; font-size: 0.75rem; text-decoration: none; font-weight: 600; background: rgba(74,222,128,0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(74,222,128,0.3);">📥 Download</a>
+          </div>
+        ` : '';
+
+        fileInfoHtml = `
+          <div style="margin-top: 8px; font-size: 0.8rem; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; border: 1px solid var(--border);">
+            <div style="font-weight: 600; color: #ffffff;">📄 ${status.uploaded_filename}</div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
+              Detected: <strong style="color: ${detColor};">${detLabel}</strong> ${conf}
+            </div>
+            ${linksHtml}
+          </div>
+        `;
+      }
+
+      const purposeText = isEmploymentProof ? 'Proof of current employment and employer relationship' : (req.description || '');
+
+      const inputId = `file_input_${req.requirement_id}`;
+
+      card.innerHTML = `
+        <div>
+          <div class="slot-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div class="slot-name" style="font-weight: 700; font-size: 1rem; color: #ffffff;">${req.display_name}</div>
+            <span class="slot-badge ${isRequired ? 'badge-req' : 'badge-opt'}">${isRequired ? 'REQUIRED' : 'OPTIONAL'}</span>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--accent); text-transform: uppercase;">Accepted documents:</div>
+            ${bulletsHtml}
+          </div>
+          ${purposeText ? `<div style="margin-bottom: 8px;"><span style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Purpose: </span><span style="font-size: 0.78rem; color: #94a3b8;">${purposeText}</span></div>` : ''}
+          ${fileInfoHtml}
+          ${errorMsgHtml}
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.05);">
+          <div>${statusBadge}</div>
+          <div class="upload-area">
+            <input type="file" id="${inputId}" style="display: none;" onchange="uploadSlotFile('${req.requirement_id}', event)">
+            <button class="btn-upload" onclick="document.getElementById('${inputId}').click()">
+              ${status.uploaded_filename ? 'Replace File' : 'Upload File'}
+            </button>
+            ${status.uploaded_filename ? `<button class="btn-remove" onclick="removeSlotFile('${req.requirement_id}')">Remove</button>` : ''}
+          </div>
+        </div>
+      `;
+      return card;
+    }
+
+    async function uploadSlotFile(requirementId, event) {
+      const files = event.target.files;
+      if (!files || files.length === 0) return;
+
+      const spinner = document.getElementById('spinner');
+      spinner.style.display = 'block';
+
+      const formData = new FormData();
+      formData.append('requirement_id', requirementId);
+      formData.append('file', files[0]);
+
+      try {
+        const res = await fetch(`/api/applications/${currentAppId}/slot-upload`, {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        currentAppStatus = data.application_status;
+        renderSlots();
+      } catch (err) {
+        alert('Error uploading file to slot: ' + err.message);
+      } finally {
+        spinner.style.display = 'none';
+      }
+    }
+
+    async function removeSlotFile(requirementId) {
+      const spinner = document.getElementById('spinner');
+      spinner.style.display = 'block';
+      try {
+        const res = await fetch(`/api/applications/${currentAppId}/slot/${requirementId}`, {
+          method: 'DELETE'
+        });
+        currentAppStatus = await res.json();
+        renderSlots();
+      } catch (err) {
+        alert('Error removing file: ' + err.message);
+      } finally {
+        spinner.style.display = 'none';
+      }
+    }
+
+    async function processApplication() {
+      const spinner = document.getElementById('spinner');
+      spinner.style.display = 'block';
+      try {
+        const res = await fetch(`/api/applications/${currentAppId}/process`, {
+          method: 'POST'
+        });
+        const data = await res.json();
+        renderResults(
+          data.classification_results || [],
+          data.extraction_results || [],
+          data.validation_results || [],
+          data.cross_document_results || null,
+          data.risk_assessment_results || null,
+          data.final_report_results || null
+        );
+      } catch (err) {
+        alert('Error processing application: ' + err.message);
+      } finally {
+        spinner.style.display = 'none';
+      }
+    }
+
+    function renderResults(classResults, extractResults = [], validationResults = [], crossDocResults = null, riskResults = null, finalReport = null) {
+      const resultsList = document.getElementById('resultsList');
+      if (!classResults || classResults.length === 0) {
+        resultsList.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No documents processed yet.</p>';
+        return;
+      }
+      resultsList.innerHTML = '';
+
+      // 1. Render Agent 1, 2 & 3 Document Cards First
+      classResults.forEach((item, idx) => {
+        const extData = extractResults[idx] || {};
+        const fields = extData.fields || {};
+
+        let fieldsHtml = '';
+        const fieldKeys = Object.keys(fields);
+        const comp = extData.extraction_completeness !== undefined ? extData.extraction_completeness.toFixed(1) + '%' : '0%';
+        const fExt = extData.fields_extracted !== undefined ? extData.fields_extracted : 0;
+        const fReq = extData.fields_requested !== undefined ? extData.fields_requested : fieldKeys.length;
+
+        if (fieldKeys.length > 0) {
+          fieldsHtml = `<div style="margin-top: 12px; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <div style="font-size: 0.85rem; font-weight: 600; color: #3b82f6;">AGENT 2: INFORMATION EXTRACTION</div>
+              <div style="font-size: 0.75rem; background: rgba(59,130,246,0.15); color: #60a5fa; padding: 2px 8px; border-radius: 4px; font-weight: 600;">
+                Completeness: ${comp} (${fExt}/${fReq} fields)
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px;">`;
+
+          fieldKeys.forEach(key => {
+            const f = fields[key] || {};
+            const val = f.value !== null && f.value !== undefined ? (typeof f.value === 'object' ? JSON.stringify(f.value) : f.value) : '<span style="color: #6b7280; font-style: italic;">null</span>';
+            const conf = f.confidence ? `${(f.confidence * 100).toFixed(0)}%` : '0%';
+            const cardBorder = f.value !== null && f.value !== undefined ? 'rgba(16,185,129,0.2)' : 'rgba(255,255,255,0.05)';
+
+            fieldsHtml += `
+              <div style="background: rgba(255,255,255,0.03); border: 1px solid ${cardBorder}; padding: 8px; border-radius: 6px; font-size: 0.8rem;">
+                <div style="color: var(--text-muted); font-size: 0.75rem; text-transform: capitalize;">${key.replace(/_/g, ' ')}</div>
+                <div style="font-weight: 500; font-family: monospace; color: #ffffff; word-break: break-all;">${val}</div>
+                <div style="font-size: 0.7rem; color: #10b981; margin-top: 4px;">Conf: ${conf}</div>
+              </div>
+            `;
+          });
+          fieldsHtml += `</div></div>`;
+        }
+
+        let validationHtml = '';
+        const valData = validationResults[idx] || {};
+        if (valData && valData.validation_status) {
+          const vStatus = valData.validation_status || 'NOT_CHECKED';
+          let vBg = 'rgba(59,130,246,0.15)', vBorder = '#3b82f6', vColor = '#60a5fa';
+          if (vStatus === 'PASS') { vBg = 'rgba(34,197,94,0.15)'; vBorder = '#22c55e'; vColor = '#4ade80'; }
+          else if (vStatus === 'WARNING') { vBg = 'rgba(234,179,8,0.15)'; vBorder = '#eab308'; vColor = '#fde047'; }
+          else if (vStatus === 'FAIL') { vBg = 'rgba(239,68,68,0.15)'; vBorder = '#ef4444'; vColor = '#f87171'; }
+
+          const score = valData.validation_score !== undefined ? valData.validation_score.toFixed(0) : 100;
+          const reqPres = valData.required_fields_present !== undefined ? valData.required_fields_present : 0;
+          const validF = valData.valid_fields !== undefined ? valData.valid_fields : 0;
+          const warnC = valData.warning_count !== undefined ? valData.warning_count : 0;
+          const errC = valData.error_count !== undefined ? valData.error_count : 0;
+          const findings = valData.findings || [];
+
+          let findingsListHtml = '';
+          if (findings.length > 0) {
+            findingsListHtml = `<div style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px;">`;
+            findings.forEach(f => {
+              let fColor = '#9ca3af', icon = 'ℹ️';
+              if (f.status === 'FAIL') { fColor = '#f87171'; icon = '❌'; }
+              else if (f.status === 'WARNING') { fColor = '#fde047'; icon = '⚠️'; }
+              else if (f.status === 'PASS') { fColor = '#4ade80'; icon = '✓'; }
+
+              findingsListHtml += `
+                <div style="font-size: 0.75rem; color: ${fColor}; background: rgba(0,0,0,0.2); padding: 4px 8px; border-radius: 4px; display: flex; align-items: center; gap: 6px;">
+                  <span>${icon}</span>
+                  <span style="font-weight: 600;">[${f.field_name}]</span>
+                  <span>${f.message}</span>
+                </div>
+              `;
+            });
+            findingsListHtml += `</div>`;
+          }
+
+          validationHtml = `<div style="margin-top: 12px; background: rgba(0,0,0,0.25); border-left: 3px solid ${vBorder}; padding: 12px; border-radius: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div style="font-size: 0.85rem; font-weight: 600; color: #a855f7;">AGENT 3: VALIDATION ENGINE</div>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span style="background: ${vBg}; color: ${vColor}; border: 1px solid ${vBorder}; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem;">
+                  ${vStatus} (${score}/100)
+                </span>
+                <span style="font-size: 0.75rem; color: var(--text-muted);">Req: ${reqPres} | Valid: ${validF} | Warn: ${warnC} | Err: ${errC}</span>
+              </div>
+            </div>
+            ${findingsListHtml}
+          </div>`;
+        }
+
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-weight: 700; font-size: 1.05rem; color: #ffffff;">${item.filename}</div>
+              <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">${item.classification_reason || ''}</div>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <span class="badge" style="background: #0284c7; color: white;">${item.document_type.replace(/_/g, ' ')}</span>
+              <span class="badge" style="background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid #22c55e;">${(item.confidence * 100).toFixed(0)}%</span>
+            </div>
+          </div>
+          ${fieldsHtml}
+          ${validationHtml}
+        `;
+        resultsList.appendChild(card);
+      });
+
+      // 2. Render Agent 4 Section if present
+      if (crossDocResults && crossDocResults.findings) {
+        const vStatus = crossDocResults.verification_status || 'PASS';
+        const rawScore = crossDocResults.consistency_score;
+        const cScoreDisplay = (rawScore !== null && rawScore !== undefined) ? `${rawScore.toFixed(1)} / 100` : 'N/A';
+        const coverageDisplay = crossDocResults.verification_coverage !== undefined ? `${crossDocResults.verification_coverage.toFixed(1)}%` : '0.0%';
+
+        let statusColor = '#4ade80', statusBg = 'rgba(34,197,94,0.15)', statusBorder = '#22c55e';
+        if (vStatus === 'WARNING') { statusColor = '#fde047'; statusBg = 'rgba(234,179,8,0.15)'; statusBorder = '#eab308'; }
+        else if (vStatus === 'PARTIALLY_VERIFIED') { statusColor = '#fbbf24'; statusBg = 'rgba(251,191,36,0.15)'; statusBorder = '#f59e0b'; }
+        else if (vStatus === 'REVIEW_REQUIRED' || vStatus === 'FAIL') { statusColor = '#f87171'; statusBg = 'rgba(239,68,68,0.15)'; statusBorder = '#ef4444'; }
+        else if (vStatus === 'INSUFFICIENT_EVIDENCE') { statusColor = '#9ca3af'; statusBg = 'rgba(156,163,175,0.15)'; statusBorder = '#6b7280'; }
+
+        const matches = crossDocResults.match_count || 0;
+        const minorVars = crossDocResults.minor_variation_count || 0;
+        const mismatches = crossDocResults.mismatch_count || 0;
+        const unverifiable = crossDocResults.unverifiable_count || 0;
+        const naCount = crossDocResults.not_applicable_count || 0;
+        const totalComps = crossDocResults.total_comparisons || 0;
+
+        let rowsHtml = '';
+        (crossDocResults.findings || []).forEach(f => {
+          let resBadge = '<span style="color: #4ade80; font-weight: 700;">MATCH</span>';
+          if (f.comparison_result === 'MINOR_VARIATION') resBadge = '<span style="color: #60a5fa; font-weight: 700;">MINOR VARIATION</span>';
+          else if (f.comparison_result === 'MISMATCH') resBadge = '<span style="color: #f87171; font-weight: 700;">MISMATCH</span>';
+          else if (f.comparison_result === 'UNVERIFIABLE') resBadge = '<span style="color: #9ca3af; font-weight: 700;">UNVERIFIABLE</span>';
+          else if (f.comparison_result === 'NOT_APPLICABLE') resBadge = '<span style="color: #c084fc; font-weight: 700;">NOT APPLICABLE</span>';
+
+          let sevPill = `<span style="background: rgba(255,255,255,0.1); color: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 600;">${f.severity || 'INFO'}</span>`;
+          if (f.severity === 'CRITICAL') sevPill = `<span style="background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">CRITICAL</span>`;
+          else if (f.severity === 'HIGH') sevPill = `<span style="background: rgba(249,115,22,0.25); color: #fb923c; border: 1px solid #f97316; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">HIGH</span>`;
+
+          rowsHtml += `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.8rem;">
+              <td style="padding: 10px; font-weight: 600; color: #ffffff;">${(f.field_name || '').replace(/_/g, ' ')}</td>
+              <td style="padding: 10px; color: var(--text-muted);">
+                <div style="font-weight: 500; color: #60a5fa;">${(f.doc1_type || '').replace(/_/g, ' ')}</div>
+                <div style="font-family: monospace; color: #ffffff;">${f.doc1_value !== null ? f.doc1_value : '<span style="color:#6b7280; font-style:italic;">null</span>'}</div>
+              </td>
+              <td style="padding: 10px; color: var(--text-muted);">
+                <div style="font-weight: 500; color: #60a5fa;">${(f.doc2_type || '').replace(/_/g, ' ')}</div>
+                <div style="font-family: monospace; color: #ffffff;">${f.doc2_value !== null ? f.doc2_value : '<span style="color:#6b7280; font-style:italic;">null</span>'}</div>
+              </td>
+              <td style="padding: 10px;">${resBadge}</td>
+              <td style="padding: 10px;">${sevPill}</td>
+              <td style="padding: 10px; color: #e5e7eb; font-size: 0.75rem;">${f.message || ''}</td>
+            </tr>
+          `;
+        });
+
+        const agent4Card = document.createElement('div');
+        agent4Card.className = 'card';
+        agent4Card.style.border = `2px solid ${statusBorder}`;
+        agent4Card.style.marginBottom = '24px';
+        agent4Card.style.background = 'linear-gradient(135deg, rgba(30,41,59,0.9), rgba(15,23,42,0.95))';
+        agent4Card.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px;">
+            <div>
+              <div style="font-size: 0.8rem; font-weight: 700; color: #ec4899; tracking: 1px;">AGENT 4 — CROSS-DOCUMENT VERIFICATION ENGINE</div>
+              <div style="font-size: 1.1rem; font-weight: 700; color: #ffffff; margin-top: 2px;">Cross-Document Consistency Analysis</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+              <div style="text-align: right;">
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Verification Coverage</div>
+                <div style="font-size: 1.1rem; font-weight: 700; color: #60a5fa;">${coverageDisplay}</div>
+              </div>
+              <div style="text-align: right;">
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Consistency Score</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: ${statusColor};">${cScoreDisplay}</div>
+              </div>
+              <span class="badge" style="background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; font-size: 0.85rem; padding: 6px 12px; font-weight: 800;">
+                ${vStatus.replace(/_/g, ' ')}
+              </span>
+            </div>
+          </div>
+
+          <!-- Summary Pills -->
+          <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+            <div style="background: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;">
+              Total Comparisons: <strong style="color: #ffffff;">${totalComps}</strong>
+            </div>
+            <div style="background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #4ade80;">
+              Matches: <strong>${matches}</strong>
+            </div>
+            <div style="background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #60a5fa;">
+              Minor Variations: <strong>${minorVars}</strong>
+            </div>
+            <div style="background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #f87171;">
+              Mismatches: <strong>${mismatches}</strong>
+            </div>
+            <div style="background: rgba(156,163,175,0.1); border: 1px solid rgba(156,163,175,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #9ca3af;">
+              Unverifiable: <strong>${unverifiable}</strong>
+            </div>
+            ${naCount > 0 ? `<div style="background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #c084fc;">
+              Role Separation: <strong>${naCount}</strong>
+            </div>` : ''}
+          </div>
+
+          ${vStatus === 'INSUFFICIENT_EVIDENCE' ? `
+            <div style="background: rgba(156,163,175,0.1); border-left: 4px solid #6b7280; padding: 12px; border-radius: 6px; margin-bottom: 16px; font-size: 0.85rem; color: #e5e7eb;">
+              ℹ️ <strong>Insufficient Evidence</strong>: No comparable extracted values were available from the uploaded documents to perform cross-document verification.
+            </div>
+          ` : ''}
+
+          <!-- Findings Table -->
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left;">
+              <thead>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
+                  <th style="padding: 8px;">Field</th>
+                  <th style="padding: 8px;">Document A</th>
+                  <th style="padding: 8px;">Document B</th>
+                  <th style="padding: 8px;">Result</th>
+                  <th style="padding: 8px;">Severity</th>
+                  <th style="padding: 8px;">Explanation & Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </div>
+        `;
+        resultsList.appendChild(agent4Card);
+      }
+
+      // 3. Render Agent 5 Section if present
+      if (riskResults) {
+        const rScore = riskResults.risk_score !== undefined ? riskResults.risk_score.toFixed(1) : '0.0';
+        const rLevel = riskResults.risk_level || 'LOW';
+        const rAction = riskResults.recommended_action || 'PROCEED_TO_REPORT';
+
+        let rColor = '#4ade80', rBg = 'rgba(34,197,94,0.15)', rBorder = '#22c55e';
+        if (rLevel === 'MEDIUM') { rColor = '#fde047'; rBg = 'rgba(234,179,8,0.15)'; rBorder = '#eab308'; }
+        else if (rLevel === 'HIGH') { rColor = '#fb923c'; rBg = 'rgba(249,115,22,0.15)'; rBorder = '#f97316'; }
+        else if (rLevel === 'CRITICAL') { rColor = '#f87171'; rBg = 'rgba(239,68,68,0.15)'; rBorder = '#ef4444'; }
+
+        let rfRowsHtml = '';
+        (riskResults.risk_factors || []).forEach(rf => {
+          let sevBadge = `<span style="background: rgba(255,255,255,0.1); color: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 600;">${rf.severity || 'LOW'}</span>`;
+          if (rf.severity === 'CRITICAL') sevBadge = `<span style="background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">CRITICAL (+${rf.points})</span>`;
+          else if (rf.severity === 'HIGH') sevBadge = `<span style="background: rgba(249,115,22,0.25); color: #fb923c; border: 1px solid #f97316; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">HIGH (+${rf.points})</span>`;
+          else if (rf.severity === 'MEDIUM') sevBadge = `<span style="background: rgba(234,179,8,0.25); color: #fde047; border: 1px solid #eab308; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">MEDIUM (+${rf.points})</span>`;
+
+          rfRowsHtml += `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.8rem;">
+              <td style="padding: 10px; font-weight: 700; color: #a855f7;">${(rf.category || '').replace(/_/g, ' ')}</td>
+              <td style="padding: 10px;">${sevBadge}</td>
+              <td style="padding: 10px; font-weight: 600; color: #ffffff;">
+                ${rf.title}
+                <div style="font-size: 0.75rem; color: var(--text-muted); font-weight: 400; margin-top: 2px;">${rf.description}</div>
+              </td>
+              <td style="padding: 10px; color: #60a5fa; font-size: 0.75rem;">${rf.source || ''}</td>
+              <td style="padding: 10px; color: #e5e7eb; font-size: 0.75rem; font-family: monospace;">${rf.evidence || ''}</td>
+              <td style="padding: 10px; color: #a7f3d0; font-size: 0.75rem;">${rf.recommendation || ''}</td>
+            </tr>
+          `;
+        });
+
+        const agent5Card = document.createElement('div');
+        agent5Card.className = 'card';
+        agent5Card.style.border = `2px solid ${rBorder}`;
+        agent5Card.style.marginBottom = '24px';
+        agent5Card.style.background = 'linear-gradient(135deg, rgba(24,24,37,0.95), rgba(15,23,42,0.95))';
+        agent5Card.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px;">
+            <div>
+              <div style="font-size: 0.8rem; font-weight: 700; color: #a855f7; tracking: 1px;">AGENT 5 — RISK & ANOMALY DETECTION ENGINE</div>
+              <div style="font-size: 1.1rem; font-weight: 700; color: #ffffff; margin-top: 2px;">Application Risk & Anomaly Assessment</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+              <div style="text-align: right;">
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Risk Score</div>
+                <div style="font-size: 1.5rem; font-weight: 900; color: ${rColor};">${rScore} / 100</div>
+              </div>
+              <span class="badge" style="background: ${rBg}; color: ${rColor}; border: 1px solid ${rBorder}; font-size: 0.85rem; padding: 6px 12px; font-weight: 800;">
+                RISK: ${rLevel}
+              </span>
+              <span class="badge" style="background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid #6366f1; font-size: 0.85rem; padding: 6px 12px; font-weight: 700;">
+                ${rAction.replace(/_/g, ' ')}
+              </span>
+            </div>
+          </div>
+
+          <!-- Risk Pills -->
+          <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+            <div style="background: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;">
+              Total Risk Factors: <strong style="color: #ffffff;">${riskResults.total_risk_factors || 0}</strong>
+            </div>
+            <div style="background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #f87171;">
+              Critical: <strong>${riskResults.critical_count || 0}</strong>
+            </div>
+            <div style="background: rgba(249,115,22,0.1); border: 1px solid rgba(249,115,22,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #fb923c;">
+              High: <strong>${riskResults.high_count || 0}</strong>
+            </div>
+            <div style="background: rgba(234,179,8,0.1); border: 1px solid rgba(234,179,8,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #fde047;">
+              Medium: <strong>${riskResults.medium_count || 0}</strong>
+            </div>
+            <div style="background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.2); padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; color: #4ade80;">
+              Low: <strong>${riskResults.low_count || 0}</strong>
+            </div>
+          </div>
+
+          <!-- Risk Score Breakdown -->
+          ${(riskResults.risk_factors || []).length > 0 ? `
+            <div style="background: rgba(15,23,42,0.8); border: 1px solid rgba(255,255,255,0.1); padding: 14px 16px; border-radius: 6px; margin-bottom: 16px;">
+              <div style="font-size: 0.8rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; margin-bottom: 8px;">
+                📊 RISK SCORE BREAKDOWN
+              </div>
+              <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+                <tbody>
+                  ${(riskResults.risk_factors || []).map(rf => `
+                    <tr style="border-bottom: 1px dashed rgba(255,255,255,0.08);">
+                      <td style="padding: 6px 0; color: #e5e7eb; font-weight: 600;">${rf.title}</td>
+                      <td style="padding: 6px 0; color: #60a5fa; font-size: 0.75rem; text-align: center;">${rf.source || 'Agent 5 Risk Rule'}</td>
+                      <td style="padding: 6px 0; font-weight: 700; color: #f87171; text-align: right;">+${rf.points}</td>
+                    </tr>
+                  `).join('')}
+                  <tr style="font-weight: 800; font-size: 0.95rem; border-top: 2px solid rgba(255,255,255,0.2);">
+                    <td style="padding: 10px 0; color: #ffffff;" colspan="2">TOTAL RISK SCORE</td>
+                    <td style="padding: 10px 0; color: ${rColor}; text-align: right;">${rScore} / 100</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ` : ''}
+
+          <!-- Summary Box -->
+          <div style="background: rgba(168,85,247,0.08); border-left: 4px solid #a855f7; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: #c084fc; text-transform: uppercase; margin-bottom: 4px;">Executive Risk Summary</div>
+            <div style="font-size: 0.85rem; color: #e5e7eb; line-height: 1.5;">${riskResults.overall_summary || 'No summary available.'}</div>
+          </div>
+
+          <!-- Risk Factors Table -->
+          ${(riskResults.risk_factors || []).length > 0 ? `
+            <div style="overflow-x: auto;">
+              <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                <thead>
+                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
+                    <th style="padding: 8px;">Category</th>
+                    <th style="padding: 8px;">Severity</th>
+                    <th style="padding: 8px;">Risk Factor</th>
+                    <th style="padding: 8px;">Source</th>
+                    <th style="padding: 8px;">Evidence</th>
+                    <th style="padding: 8px;">Recommendation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rfRowsHtml}
+                </tbody>
+              </table>
+            </div>
+          ` : `
+            <div style="color: #4ade80; font-size: 0.85rem; padding: 8px 0; font-weight: 600;">
+              ✅ Zero active risk factors detected. Application exhibits pristine document quality and consistency.
+            </div>
+          `}
+        `;
+        resultsList.appendChild(agent5Card);
+      }
+
+      // 4. Render Agent 6 Final Report Section Last (After Agent 5)
+      if (finalReport) {
+        const dec = finalReport.decision || 'HUMAN_REVIEW';
+        let decColor = '#4ade80', decBg = 'rgba(34,197,94,0.15)', decBorder = '#22c55e';
+        if (dec === 'HUMAN_REVIEW') { decColor = '#fde047'; decBg = 'rgba(234,179,8,0.15)'; decBorder = '#eab308'; }
+        else if (dec === 'INSUFFICIENT_EVIDENCE') { decColor = '#f87171'; decBg = 'rgba(239,68,68,0.15)'; decBorder = '#ef4444'; }
+
+        const docSum = finalReport.document_summary || {};
+        const valSum = finalReport.validation_summary || {};
+        const crossSum = finalReport.cross_document_summary || {};
+        const riskSum = finalReport.risk_summary || {};
+        const findingsList = finalReport.key_findings || [];
+        const recsList = finalReport.recommendations || [];
+
+        const agent6Card = document.createElement('div');
+        agent6Card.className = 'card';
+        agent6Card.style.border = `2px solid ${decBorder}`;
+        agent6Card.style.marginBottom = '24px';
+        agent6Card.style.background = 'linear-gradient(135deg, rgba(15,23,42,0.98), rgba(30,27,75,0.95))';
+        agent6Card.innerHTML = `
+          <!-- HEADER -->
+          <div style="border-bottom: 2px solid ${decBorder}; padding-bottom: 12px; margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px;">
+              <div>
+                <div style="font-size: 0.75rem; font-weight: 800; color: #a855f7; letter-spacing: 1.5px;">AGENT 6 — FINAL REPORT & DECISION ENGINE</div>
+                <h2 style="font-size: 1.4rem; font-weight: 900; color: #ffffff; margin-top: 4px; letter-spacing: 0.5px;">FINAL LOAN APPLICATION REPORT</h2>
+                <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
+                  Application: <strong style="color: #60a5fa;">${finalReport.application_id}</strong> | Loan Type: <strong style="color: #ffffff;">${(finalReport.loan_type || '').replace(/_/g, ' ').toUpperCase()}</strong>
+                </div>
+              </div>
+              <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+                <button id="pdfDownloadBtn_${finalReport.application_id}" onclick="downloadPdfReport('${finalReport.application_id}')" style="background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; border: 1px solid #3b82f6; padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(37,99,235,0.3); transition: all 0.2s;">
+                  📄 Download PDF Report
+                </button>
+                <div>
+                  <span class="badge" style="background: ${decBg}; color: ${decColor}; border: 2px solid ${decBorder}; font-size: 1.1rem; padding: 6px 14px; font-weight: 900; display: inline-block;">
+                    ${dec.replace(/_/g, ' ')}
+                  </span>
+                  <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">
+                    Risk Score: <strong style="color: ${decColor};">${finalReport.risk_score !== undefined ? finalReport.risk_score.toFixed(1) : '0.0'} / 100</strong> (${finalReport.risk_level})
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- EXECUTIVE SUMMARY -->
+          <div style="background: rgba(168,85,247,0.1); border-left: 4px solid #a855f7; padding: 14px 16px; border-radius: 6px; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <div style="font-size: 0.8rem; font-weight: 800; color: #c084fc; text-transform: uppercase; letter-spacing: 1px;">🤖 GENAI EXECUTIVE SUMMARY</div>
+              <span style="font-size: 0.7rem; color: #94a3b8; font-family: monospace;">${finalReport.generation_status || 'GENAI_GENERATED'}</span>
+            </div>
+            <div style="font-size: 0.9rem; color: #f1f5f9; line-height: 1.6; font-weight: 400;">
+              ${finalReport.executive_summary}
+            </div>
+          </div>
+
+          <!-- GRID BREAKDOWNS -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px;">
+            <!-- DOCUMENT SUMMARY -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 6px;">
+              <div style="font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; margin-bottom: 8px;">DOCUMENT STATUS</div>
+              <div style="font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                Uploaded: <strong>${docSum.uploaded_count || 0}</strong> | Required: <strong>${docSum.required_count || 0}</strong><br/>
+                Satisfied: <strong style="color: #4ade80;">${docSum.satisfied_count || 0}</strong> | Missing: <strong style="color: #f87171;">${docSum.missing_count || 0}</strong><br/>
+                Status: <span style="font-weight: 700; color: ${docSum.status === 'COMPLETE' ? '#4ade80' : '#f87171'};">${docSum.status}</span>
+              </div>
+            </div>
+
+            <!-- VALIDATION SUMMARY -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 6px;">
+              <div style="font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; margin-bottom: 8px;">VALIDATION SUMMARY</div>
+              <div style="font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                Total Checks: <strong>${valSum.total_checks || 0}</strong><br/>
+                Passed: <strong style="color: #4ade80;">${valSum.passed_count || 0}</strong> | Warnings: <strong style="color: #fde047;">${valSum.warning_count || 0}</strong><br/>
+                Errors: <strong style="color: #f87171;">${valSum.error_count || 0}</strong> | Blocking: <strong style="color: #f87171;">${valSum.blocking_count || 0}</strong>
+              </div>
+            </div>
+
+            <!-- CROSS-DOCUMENT VERIFICATION -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 6px;">
+              <div style="font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; margin-bottom: 8px;">CROSS-DOC VERIFICATION</div>
+              <div style="font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                Coverage: <strong style="color: #60a5fa;">${crossSum.verification_coverage !== undefined ? crossSum.verification_coverage.toFixed(1) : 0}%</strong><br/>
+                Consistency: <strong>${crossSum.consistency_score !== null && crossSum.consistency_score !== undefined ? crossSum.consistency_score.toFixed(0) + '/100' : 'N/A'}</strong><br/>
+                Matches: <strong style="color: #4ade80;">${crossSum.match_count || 0}</strong> | Mismatches: <strong style="color: #f87171;">${crossSum.mismatch_count || 0}</strong>
+              </div>
+            </div>
+
+            <!-- RISK SUMMARY -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 6px;">
+              <div style="font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; margin-bottom: 8px;">RISK SUMMARY</div>
+              <div style="font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                Score: <strong style="color: ${decColor};">${riskSum.risk_score !== undefined ? riskSum.risk_score.toFixed(1) : '0.0'}/100</strong> (${riskSum.risk_level})<br/>
+                Critical: <strong style="color: #f87171;">${riskSum.critical_count || 0}</strong> | High: <strong style="color: #fb923c;">${riskSum.high_count || 0}</strong><br/>
+                Medium: <strong style="color: #fde047;">${riskSum.medium_count || 0}</strong> | Low: <strong style="color: #4ade80;">${riskSum.low_count || 0}</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- KEY FINDINGS & RECOMMENDATIONS -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px;">
+            <div style="background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); padding: 14px; border-radius: 6px;">
+              <div style="font-size: 0.8rem; font-weight: 700; color: #fb923c; text-transform: uppercase; margin-bottom: 8px;">KEY FINDINGS</div>
+              <ul style="padding-left: 18px; margin: 0; font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                ${findingsList.map(f => `<li>${f}</li>`).join('')}
+              </ul>
+            </div>
+            <div style="background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); padding: 14px; border-radius: 6px;">
+              <div style="font-size: 0.8rem; font-weight: 700; color: #34d399; text-transform: uppercase; margin-bottom: 8px;">ACTIONABLE RECOMMENDATIONS</div>
+              <ul style="padding-left: 18px; margin: 0; font-size: 0.85rem; color: #e2e8f0; line-height: 1.6;">
+                ${recsList.map(r => `<li>${r}</li>`).join('')}
+              </ul>
+            </div>
+          </div>
+
+          <!-- FINAL RECOMMENDATION CARD -->
+          <div style="background: ${decBg}; border: 1px solid ${decBorder}; padding: 16px; border-radius: 6px; text-align: center;">
+            <div style="font-size: 0.75rem; font-weight: 800; color: ${decColor}; text-transform: uppercase; letter-spacing: 1px;">FINAL DECISION & NEXT ACTION</div>
+            <div style="font-size: 1.3rem; font-weight: 900; color: ${decColor}; margin-top: 4px;">${dec.replace(/_/g, ' ')}</div>
+            <div style="font-size: 0.85rem; color: #f8fafc; margin-top: 6px; font-weight: 600;">Reason: ${finalReport.decision_reason}</div>
+          </div>
+        `;
+        resultsList.appendChild(agent6Card);
+      }
+    }
+
+    async function downloadPdfReport(appId) {
+      const btn = document.getElementById(`pdfDownloadBtn_${appId}`);
+      const originalHtml = btn ? btn.innerHTML : '📄 Download PDF Report';
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.75';
+        btn.innerHTML = '⏳ Generating PDF...';
+      }
+
+      try {
+        const response = await fetch(`/api/applications/${appId}/report/pdf`);
+        if (!response.ok) {
+          const errJson = await response.json().catch(() => ({ detail: 'HTTP ' + response.status }));
+          throw new Error(errJson.detail || 'PDF generation failed on server.');
+        }
+
+        const blob = await response.blob();
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = `loan_application_report_${appId}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(downloadUrl);
+
+        if (btn) {
+          btn.innerHTML = '📄 Download PDF Report';
+          btn.disabled = false;
+          btn.style.opacity = '1';
+        }
+      } catch (err) {
+        console.error('PDF Download Error:', err);
+        if (btn) {
+          btn.innerHTML = '⚠️ PDF generation failed';
+          btn.style.background = '#991b1b';
+          btn.style.borderColor = '#ef4444';
+          alert('PDF Generation Error: ' + err.message);
+
+          setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
+            btn.style.borderColor = '#3b82f6';
+          }, 3000);
+        }
+      }
+    }
+
+    // Initialize application session on load
+    initSession();
+  </script>
+</body>
+</html>

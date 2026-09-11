@@ -1,0 +1,10 @@
+PAYSLIP FOR MONTH OF JULY 2026
+Employee Name: C Hanumantha Reddy
+Employer Name: Tech Solutions Ltd
+Designation: Senior Manager
+Pay Period: July 2026
+Basic Salary: INR 60000
+Gross Salary: INR 90000
+Net Salary: INR 78000
+Net Payable Salary: INR 78000
+Deductions: INR 12000

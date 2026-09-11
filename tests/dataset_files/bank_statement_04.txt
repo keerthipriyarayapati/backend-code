@@ -1,0 +1,6 @@
+BANK STATEMENT SUMMARY
+Acct No: 88776655
+Period: Q1 2025
+Total Credits: $15,000
+Total Debits: $11,200
+Ending Balance: $3,800
