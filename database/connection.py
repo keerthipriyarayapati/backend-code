@@ -71,18 +71,77 @@ def init_db():
                 conn.execute(text("ALTER TABLE documents ADD COLUMN extraction_error VARCHAR(100)"))
                 conn.commit()
                 logger.info("Migrated documents table: added extraction_error column.")
+
+            # Migrate loan_applications table schema
+            app_res = conn.execute(text("PRAGMA table_info(loan_applications)")).fetchall()
+            app_cols = {row[1] for row in app_res}
+            if "employee_id" not in app_cols:
+                conn.execute(text("ALTER TABLE loan_applications ADD COLUMN employee_id VARCHAR(100)"))
+                conn.commit()
+                logger.info("Migrated loan_applications table: added employee_id column.")
+            if "branch_id" not in app_cols:
+                conn.execute(text("ALTER TABLE loan_applications ADD COLUMN branch_id VARCHAR(100)"))
+                conn.commit()
+                logger.info("Migrated loan_applications table: added branch_id column.")
+            if "risk_level" not in app_cols:
+                conn.execute(text("ALTER TABLE loan_applications ADD COLUMN risk_level VARCHAR(50)"))
+                conn.commit()
+                logger.info("Migrated loan_applications table: added risk_level column.")
+            if "completed_at" not in app_cols:
+                conn.execute(text("ALTER TABLE loan_applications ADD COLUMN completed_at DATETIME"))
+                conn.commit()
+                logger.info("Migrated loan_applications table: added completed_at column.")
+            if "processing_time" not in app_cols:
+                conn.execute(text("ALTER TABLE loan_applications ADD COLUMN processing_time FLOAT"))
+                conn.commit()
+                logger.info("Migrated loan_applications table: added processing_time column.")
     except Exception as e:
         logger.warning(f"Column migration check encountered: {e}")
 
-    # Seed document requirements and loan policies
+    # Seed document requirements, loan policies, and default users
     try:
         from database.seed import seed_document_requirements
         from policy_kb.loader import seed_loan_policies
+        from database.models import User
+        from auth.security import get_password_hash
+
         db = SessionLocal()
         try:
             seed_document_requirements(db)
             seed_loan_policies(db)
+
+            # Seed default BANK_EMPLOYEE and BANK_MANAGER if not present
+            def_users = [
+                {
+                    "email": "employee@bank.com",
+                    "full_name": "John Employee",
+                    "role": "BANK_EMPLOYEE",
+                    "branch_id": "BR-MUMBAI-01",
+                    "password": "Password@123"
+                },
+                {
+                    "email": "manager@bank.com",
+                    "full_name": "Jane Manager",
+                    "role": "BANK_MANAGER",
+                    "branch_id": "BR-MUMBAI-01",
+                    "password": "Password@123"
+                }
+            ]
+            for u_data in def_users:
+                existing_u = db.query(User).filter(User.email == u_data["email"]).first()
+                if not existing_u:
+                    u = User(
+                        email=u_data["email"],
+                        full_name=u_data["full_name"],
+                        role=u_data["role"],
+                        branch_id=u_data["branch_id"],
+                        password_hash=get_password_hash(u_data["password"]),
+                        is_active=True
+                    )
+                    db.add(u)
+            db.commit()
+            logger.info("Default bank employee and manager accounts ensured.")
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"Error seeding database requirements and policies: {e}", exc_info=True)
+        logger.error(f"Error seeding database requirements, policies, or users: {e}", exc_info=True)

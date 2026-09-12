@@ -28,7 +28,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from shared.state import LoanDocumentState
 from database.connection import init_db, get_db
 import database.repositories as repos
-from database.models import DocumentModel
+from database.models import DocumentModel, User
+from auth.security import create_access_token, verify_password
+from auth.schemas import LoginRequest, TokenResponse, UserResponse
+from auth.dependencies import (
+    require_authenticated_user,
+    require_role,
+    require_manager,
+    get_current_user
+)
 
 from agents.agent_1_document.agent import (
     DocumentClassificationAgent,
@@ -76,9 +84,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Upload directory
+# Upload and frontend directories
 UPLOAD_DIR = PROJECT_ROOT / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_root_page():
+    """Serves the Single-Page Application."""
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>Loan Document Processing AI</h1>")
+
+
+@app.get("/manager/dashboard", response_class=HTMLResponse)
+async def serve_manager_dashboard_page():
+    """Serves the Single-Page Application with manager route."""
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>Bank Manager Analytics Dashboard</h1>")
+
 
 # Initialize Agents
 agent_1 = DocumentClassificationAgent()
@@ -311,6 +339,51 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
 
 
 # =============================================================================
+# AUTHENTICATION & SESSION ENDPOINTS
+# =============================================================================
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login_endpoint(login_data: LoginRequest, db: Session = Depends(get_db)):
+    """Authenticates corporate user (Bank Employee or Bank Manager) and returns JWT access token."""
+    user = repos.get_user_by_email(db, login_data.email)
+    if not user or not verify_password(login_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="User account is deactivated. Contact administrator.")
+
+    token_payload = {
+        "sub": str(user.id),
+        "email": user.email,
+        "role": user.role,
+        "branch_id": user.branch_id,
+        "full_name": user.full_name
+    }
+    token = create_access_token(token_payload)
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        expires_in=86400,
+        user=UserResponse.model_validate(user)
+    )
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+async def get_current_user_profile(current_user: User = Depends(require_authenticated_user)):
+    """Returns the authenticated profile of the currently logged-in user."""
+    return UserResponse.model_validate(current_user)
+
+
+@app.post("/api/auth/logout")
+async def logout_endpoint():
+    """Logs out user and invalidates client session."""
+    return JSONResponse(content={"message": "Logged out successfully."})
+
+
+# =============================================================================
 # RESTFUL DATABASE API ENDPOINTS
 # =============================================================================
 
@@ -366,6 +439,7 @@ async def get_document_requirements_api(loan_type: str, db: Session = Depends(ge
 async def create_application_endpoint(
     loan_type: str = Form("personal_loan"),
     applicant_name: Optional[str] = Form(None),
+    current_user: User = Depends(require_authenticated_user),
     db: Session = Depends(get_db)
 ):
     """Creates a new loan application session initialized in SQLite."""
@@ -375,16 +449,49 @@ async def create_application_endpoint(
         application_id=app_id,
         loan_type=loan_type,
         applicant_name=applicant_name or "Primary Applicant",
-        status="NOT_STARTED"
+        status="NOT_STARTED",
+        employee_id=current_user.email,
+        branch_id=current_user.branch_id
     )
 
     status_obj = _build_application_status_db(app_id, db)
     return JSONResponse(content=status_obj.model_dump())
 
 
+@app.get("/applications")
+@app.get("/api/applications")
+async def list_applications_endpoint(
+    limit: int = 50,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
+    """Lists loan applications."""
+    apps = repos.list_applications(db, limit=limit)
+    res = []
+    for a in apps:
+        res.append({
+            "id": a.id,
+            "application_id": a.application_id,
+            "loan_type": a.loan_type,
+            "applicant_name": a.applicant_name,
+            "status": a.status,
+            "risk_level": a.risk_level or "LOW",
+            "employee_id": a.employee_id,
+            "branch_id": a.branch_id,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+            "processing_time": a.processing_time
+        })
+    return JSONResponse(content={"applications": res})
+
+
 @app.get("/applications/{application_id}")
 @app.get("/api/applications/{application_id}")
-async def get_application_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves loan application details from SQLite."""
     app_rec = repos.get_application(db, application_id)
     if not app_rec:
@@ -416,7 +523,11 @@ async def get_application_endpoint(application_id: str, db: Session = Depends(ge
 
 @app.get("/applications/{application_id}/documents")
 @app.get("/api/applications/{application_id}/documents")
-async def get_application_documents_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_documents_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves all document metadata for an application from SQLite."""
     docs = repos.get_documents(db, application_id)
     res = []
@@ -440,7 +551,11 @@ async def get_application_documents_endpoint(application_id: str, db: Session = 
 
 @app.get("/applications/{application_id}/requirements")
 @app.get("/api/applications/{application_id}/requirements")
-async def get_application_requirements_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_requirements_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves requirement status checklist for an application."""
     status_obj = _build_application_status_db(application_id, db)
     return JSONResponse(content=status_obj.model_dump())
@@ -448,7 +563,11 @@ async def get_application_requirements_endpoint(application_id: str, db: Session
 
 @app.get("/applications/{application_id}/extractions")
 @app.get("/api/applications/{application_id}/extractions")
-async def get_application_extractions_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_extractions_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves Agent 2 extracted fields from SQLite."""
     ext_results = repos.get_extraction_results_by_application(db, application_id)
     return JSONResponse(content={"application_id": application_id, "extraction_results": ext_results})
@@ -456,7 +575,11 @@ async def get_application_extractions_endpoint(application_id: str, db: Session 
 
 @app.get("/applications/{application_id}/validation")
 @app.get("/api/applications/{application_id}/validation")
-async def get_application_validation_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_validation_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves Agent 3 validation results from SQLite."""
     val_results = repos.get_validation_results_by_application(db, application_id)
     return JSONResponse(content={"application_id": application_id, "validation_results": val_results})
@@ -464,7 +587,11 @@ async def get_application_validation_endpoint(application_id: str, db: Session =
 
 @app.get("/applications/{application_id}/cross-document")
 @app.get("/api/applications/{application_id}/cross-document")
-async def get_application_cross_doc_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_cross_doc_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves Agent 4 cross-document verification findings from SQLite."""
     cross_results = repos.get_cross_document_findings_by_application(db, application_id)
     return JSONResponse(content=cross_results)
@@ -472,7 +599,11 @@ async def get_application_cross_doc_endpoint(application_id: str, db: Session = 
 
 @app.get("/applications/{application_id}/risk")
 @app.get("/api/applications/{application_id}/risk")
-async def get_application_risk_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_risk_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves Agent 5 risk assessment from SQLite."""
     risk_res = repos.get_risk_assessment_by_application(db, application_id)
     if not risk_res:
@@ -482,7 +613,11 @@ async def get_application_risk_endpoint(application_id: str, db: Session = Depen
 
 @app.get("/applications/{application_id}/report")
 @app.get("/api/applications/{application_id}/report")
-async def get_application_report_endpoint(application_id: str, db: Session = Depends(get_db)):
+async def get_application_report_endpoint(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves Agent 6 final report from SQLite."""
     report_res = repos.get_final_report_by_application(db, application_id)
     if not report_res:
@@ -550,6 +685,7 @@ async def upload_slot_document(
     application_id: str,
     requirement_id: str = Form(...),
     file: UploadFile = File(...),
+    current_user: User = Depends(require_authenticated_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -669,7 +805,12 @@ async def upload_slot_document(
 
 
 @app.delete("/api/applications/{application_id}/slot/{requirement_id}")
-async def remove_slot_document(application_id: str, requirement_id: str, db: Session = Depends(get_db)):
+async def remove_slot_document(
+    application_id: str,
+    requirement_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """Removes an uploaded document from a requirement slot in SQLite."""
     docs = repos.get_documents(db, application_id, active_only=True)
     target_docs = [d for d in docs if d.requirement_id == requirement_id]
@@ -757,7 +898,11 @@ async def get_application_document_status(application_id: str, db: Session = Dep
 
 
 @app.post("/api/applications/{application_id}/process")
-async def process_application_documents(application_id: str, db: Session = Depends(get_db)):
+async def process_application_documents(
+    application_id: str,
+    current_user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db)
+):
     """
     Executes Agents 2–6 on accepted uploaded documents and persists all results into SQLite.
     """
@@ -921,6 +1066,13 @@ async def process_application_documents(application_id: str, db: Session = Depen
 
     repos.update_processing_run(db, run_rec.id, "COMPLETED", "completed", total_time_ms=telemetry.total_pipeline_duration_ms)
     repos.update_application_status(db, application_id, "COMPLETED")
+    repos.update_application_completion(
+        db,
+        application_id=application_id,
+        status=final_report.decision or "COMPLETED",
+        risk_level=risk_res.risk_level,
+        processing_time=telemetry.total_pipeline_duration_ms
+    )
 
     status_obj = _build_application_status_db(application_id, db)
 
@@ -1018,8 +1170,190 @@ async def get_application_final_report_endpoint(application_id: str, db: Session
 
 
 # =============================================================================
+# MANAGER ANALYTICS & MONITORING ENDPOINTS (BANK_MANAGER ONLY)
+# =============================================================================
+
+@app.get("/manager/dashboard/summary")
+@app.get("/api/manager/dashboard/summary")
+@app.get("/manager/dashboard/analytics")
+@app.get("/api/manager/dashboard/analytics")
+async def get_manager_analytics_summary(
+    loan_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature A: Metric cards for total, approved, rejected, review, and insufficient loans."""
+    summary = repos.get_analytics_summary(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    lt_stats = repos.get_loan_type_statistics(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    trends = repos.get_monthly_trends(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    risk_dist = repos.get_risk_distribution(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    perf = repos.get_processing_performance(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    agents = repos.get_agent_performance(db, from_date=from_date, to_date=to_date)
+    val_errors = repos.get_validation_analytics(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    high_risk = repos.get_high_risk_applications(db, limit=10, from_date=from_date, to_date=to_date, branch_id=branch_id)
+
+    return JSONResponse(content={
+        **summary,
+        "loan_type_statistics": lt_stats,
+        "monthly_trends": trends,
+        "risk_distribution": risk_dist.get("distribution", []),
+        "risk_summary": risk_dist,
+        "average_processing_time": perf.get("average_processing_time"),
+        "average_processing_time_ms": perf.get("average_processing_time_ms"),
+        "total_processed": perf.get("total_processed"),
+        "currently_processing": perf.get("currently_processing"),
+        "failed_processing": perf.get("failed_processing"),
+        "agent_performance": agents,
+        "validation_errors": val_errors,
+        "high_risk_applications": high_risk
+    })
+
+
+@app.get("/manager/dashboard/loan-types")
+@app.get("/api/manager/dashboard/loan-types")
+async def get_manager_loan_type_statistics(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature B: Application counts aggregated by loan type across all 10 loan types."""
+    data = repos.get_loan_type_statistics(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    return JSONResponse(content={"items": data, "loan_type_statistics": data})
+
+
+@app.get("/manager/dashboard/trends")
+@app.get("/api/manager/dashboard/trends")
+@app.get("/manager/dashboard/monthly-trends")
+@app.get("/api/manager/dashboard/monthly-trends")
+async def get_manager_monthly_trends(
+    loan_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature C: Monthly application volume and approval/rejection trends."""
+    data = repos.get_monthly_trends(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    return JSONResponse(content={"months": data, "monthly_trends": data})
+
+
+@app.get("/manager/dashboard/risk-distribution")
+@app.get("/api/manager/dashboard/risk-distribution")
+async def get_manager_risk_distribution(
+    loan_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature D: Risk distribution counts (Low, Medium, High)."""
+    data = repos.get_risk_distribution(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    return JSONResponse(content=data)
+
+
+@app.get("/manager/dashboard/high-risk")
+@app.get("/api/manager/dashboard/high-risk")
+@app.get("/manager/dashboard/high-risk-applications")
+@app.get("/api/manager/dashboard/high-risk-applications")
+async def get_manager_high_risk_applications(
+    limit: int = 10,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature D: High-risk application table with risk factors and reasons."""
+    data = repos.get_high_risk_applications(db, limit=limit, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    return JSONResponse(content=data)
+
+
+@app.get("/manager/dashboard/agent-performance")
+@app.get("/api/manager/dashboard/agent-performance")
+@app.get("/manager/dashboard/processing-performance")
+@app.get("/api/manager/dashboard/processing-performance")
+async def get_manager_processing_performance(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature E & F: Processing throughput and Agent 1-6 performance."""
+    perf_data = repos.get_processing_performance(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    agent_data = repos.get_agent_performance(db, from_date=from_date, to_date=to_date)
+    return JSONResponse(content={
+        **perf_data,
+        "agents": agent_data,
+        "agent_performance": agent_data
+    })
+
+
+@app.get("/manager/dashboard/validation-analytics")
+@app.get("/api/manager/dashboard/validation-analytics")
+@app.get("/manager/dashboard/validation-errors")
+@app.get("/api/manager/dashboard/validation-errors")
+async def get_manager_validation_errors(
+    loan_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature G: Document validation failure counts, invalid fields, and common errors."""
+    data = repos.get_validation_analytics(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    return JSONResponse(content=data)
+
+
+@app.get("/manager/dashboard/applications")
+@app.get("/api/manager/dashboard/applications")
+async def get_manager_monitored_applications(
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+    loan_type: Optional[str] = None,
+    status: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    current_user: User = Depends(require_manager),
+    db: Session = Depends(get_db)
+):
+    """Feature H: Searchable, filtered, paginated applications monitoring table."""
+    data = repos.get_monitored_applications(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        loan_type=loan_type,
+        status=status,
+        risk_level=risk_level,
+        employee_id=employee_id,
+        branch_id=branch_id,
+        from_date=from_date,
+        to_date=to_date,
+        sort_by=sort_by,
+        sort_order=sort_order
+    )
+    return JSONResponse(content=data)
+
+
+# =============================================================================
 # BACKWARD COMPATIBLE AGENT ENDPOINTS
 # =============================================================================
+
 
 @app.post("/api/agent1/classify")
 async def classify_documents(

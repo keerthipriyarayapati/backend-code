@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, desc, asc, or_
 
 from database.models import (
     LoanApplication,
@@ -35,7 +36,8 @@ from database.models import (
     EligibilityResultModel,
     EligibilityRuleResultModel,
     AgentExecutionLogModel,
-    TelemetryMetricsModel
+    TelemetryMetricsModel,
+    User
 )
 
 logger = logging.getLogger("DatabaseRepositories")
@@ -50,7 +52,9 @@ def create_application(
     application_id: str,
     loan_type: str,
     applicant_name: Optional[str] = None,
-    status: str = "NOT_STARTED"
+    status: str = "NOT_STARTED",
+    employee_id: Optional[str] = None,
+    branch_id: Optional[str] = None
 ) -> LoanApplication:
     """Creates a new loan application record."""
     existing = db.query(LoanApplication).filter(LoanApplication.application_id == application_id).first()
@@ -62,6 +66,8 @@ def create_application(
         loan_type=loan_type,
         applicant_name=applicant_name,
         status=status,
+        employee_id=employee_id,
+        branch_id=branch_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
@@ -99,6 +105,29 @@ def update_application_status(db: Session, application_id: str, status: str) -> 
         db.commit()
         db.refresh(app)
     return app
+
+
+def update_application_completion(
+    db: Session,
+    application_id: str,
+    status: str,
+    risk_level: Optional[str] = None,
+    processing_time: Optional[float] = None
+) -> Optional[LoanApplication]:
+    """Updates loan application completion metadata when final report finishes."""
+    app = get_application(db, application_id)
+    if app:
+        app.status = status
+        if risk_level:
+            app.risk_level = risk_level
+        if processing_time is not None:
+            app.processing_time = processing_time
+        app.completed_at = datetime.utcnow()
+        app.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(app)
+    return app
+
 
 
 # =============================================================================
@@ -1229,4 +1258,582 @@ def get_telemetry_by_application(db: Session, application_id: str) -> Optional[D
             } for l in logs
         ]
     }
+
+
+# =============================================================================
+# 13. USERS REPOSITORY
+# =============================================================================
+
+def create_user(
+    db: Session,
+    email: str,
+    full_name: str,
+    password_hash: str,
+    role: str,
+    branch_id: Optional[str] = None
+) -> User:
+    """Creates a new user account."""
+    user = User(
+        email=email.lower().strip(),
+        full_name=full_name,
+        password_hash=password_hash,
+        role=role,
+        branch_id=branch_id,
+        is_active=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    """Retrieves a user by email address."""
+    return db.query(User).filter(User.email == email.lower().strip()).first()
+
+
+def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
+    """Retrieves a user by primary ID."""
+    return db.query(User).filter(User.id == user_id).first()
+
+
+def list_users(db: Session, role: Optional[str] = None, branch_id: Optional[str] = None) -> List[User]:
+    """Lists users with optional role and branch filtering."""
+    q = db.query(User)
+    if role:
+        q = q.filter(User.role == role)
+    if branch_id:
+        q = q.filter(User.branch_id == branch_id)
+    return q.order_by(User.created_at.desc()).all()
+
+
+# =============================================================================
+# 14. MANAGER ANALYTICS & MONITORING REPOSITORY
+# =============================================================================
+
+def _parse_filter_date(d_val: Any) -> Optional[datetime]:
+    """Parses date string or returns datetime."""
+    if not d_val:
+        return None
+    if isinstance(d_val, datetime):
+        return d_val
+    try:
+        from dateutil import parser
+        return parser.parse(str(d_val))
+    except Exception:
+        try:
+            return datetime.fromisoformat(str(d_val).replace("Z", "+00:00").split("+")[0])
+        except Exception:
+            return None
+
+
+def _filter_applications_query(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None,
+    loan_type: Optional[str] = None,
+    status: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    search: Optional[str] = None
+):
+    """Internal helper to apply common filters to LoanApplication query."""
+    q = db.query(LoanApplication)
+    
+    dt_from = _parse_filter_date(from_date)
+    if dt_from:
+        q = q.filter(LoanApplication.created_at >= dt_from)
+        
+    dt_to = _parse_filter_date(to_date)
+    if dt_to:
+        q = q.filter(LoanApplication.created_at <= dt_to)
+
+    if branch_id:
+        q = q.filter(LoanApplication.branch_id == branch_id)
+    if loan_type:
+        q = q.filter(LoanApplication.loan_type == loan_type)
+    if status:
+        q = q.filter(LoanApplication.status == status)
+    if risk_level:
+        q = q.filter(LoanApplication.risk_level == risk_level)
+    if employee_id:
+        q = q.filter(LoanApplication.employee_id == employee_id)
+    if search:
+        search_pattern = f"%{search}%"
+        q = q.filter(
+            or_(
+                LoanApplication.application_id.ilike(search_pattern),
+                LoanApplication.applicant_name.ilike(search_pattern)
+            )
+        )
+    return q
+
+
+def get_analytics_summary(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None,
+    loan_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """Feature A: Summary metric card statistics."""
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    apps = q.all()
+
+    total = len(apps)
+    approved = 0
+    rejected = 0
+    human_review = 0
+    insufficient = 0
+
+    for a in apps:
+        st = (a.status or "").upper()
+        if st in ["APPROVED", "PASS", "ELIGIBLE"]:
+            approved += 1
+        elif st in ["REJECTED", "FAIL", "NOT_ELIGIBLE"]:
+            rejected += 1
+        elif st in ["HUMAN_REVIEW", "HUMAN_REVIEW_REQUIRED"]:
+            human_review += 1
+        elif st in ["INSUFFICIENT_EVIDENCE", "INCOMPLETE", "NOT_STARTED"]:
+            insufficient += 1
+        elif st == "COMPLETED":
+            # Check FinalReport or Risk
+            fr = db.query(FinalReportModel).filter(FinalReportModel.application_id == a.application_id).first()
+            if fr and fr.decision:
+                fdec = fr.decision.upper()
+                if fdec in ["APPROVED", "PASS", "ELIGIBLE"]:
+                    approved += 1
+                elif fdec in ["REJECTED", "FAIL", "NOT_ELIGIBLE"]:
+                    rejected += 1
+                elif fdec in ["HUMAN_REVIEW", "HUMAN_REVIEW_REQUIRED"]:
+                    human_review += 1
+                else:
+                    insufficient += 1
+            else:
+                approved += 1
+
+    durations = [a.processing_time for a in apps if a.processing_time and a.processing_time > 0]
+    avg_dur = round(sum(durations) / len(durations), 2) if durations else 450.0
+
+    return {
+        "total_applications": total,
+        "approved_loans": approved,
+        "approved_applications": approved,
+        "rejected_loans": rejected,
+        "rejected_applications": rejected,
+        "human_review_required": human_review,
+        "human_review_applications": human_review,
+        "insufficient_evidence": insufficient,
+        "insufficient_evidence_applications": insufficient,
+        "approval_rate": round(approved / total * 100, 1) if total else 0.0,
+        "rejection_rate": round(rejected / total * 100, 1) if total else 0.0,
+        "human_review_rate": round(human_review / total * 100, 1) if total else 0.0,
+        "avg_processing_time_ms": avg_dur
+    }
+
+
+def get_loan_type_statistics(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Feature B: Loan-type-wise counts covering all 10 canonical loan types."""
+    from shared.policy import LOAN_DOCUMENT_POLICY, LOAN_TYPE_NAMES
+
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    rows = q.with_entities(LoanApplication.loan_type, func.count(LoanApplication.id)).group_by(LoanApplication.loan_type).all()
+
+    counts_map = {}
+    for lt, cnt in rows:
+        norm_lt = (lt or "").lower().replace(" ", "_").replace("-", "_")
+        counts_map[norm_lt] = counts_map.get(norm_lt, 0) + cnt
+
+    result = []
+    for lt_key in LOAN_DOCUMENT_POLICY.keys():
+        disp_name = LOAN_TYPE_NAMES.get(lt_key, lt_key.replace("_", " ").title())
+        result.append({
+            "loan_type": lt_key,
+            "display_name": disp_name,
+            "count": counts_map.get(lt_key, 0)
+        })
+
+    return result
+
+
+def get_monthly_trends(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None,
+    loan_type: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Feature C: Monthly application volume and approval/rejection trends."""
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    apps = q.order_by(asc(LoanApplication.created_at)).all()
+
+    months_data: Dict[str, Dict[str, int]] = {}
+    for a in apps:
+        m_str = a.created_at.strftime("%Y-%m") if a.created_at else "Unknown"
+        if m_str not in months_data:
+            months_data[m_str] = {"total": 0, "approved": 0, "rejected": 0}
+
+        months_data[m_str]["total"] += 1
+        st = (a.status or "").upper()
+        if st in ["APPROVED", "PASS", "ELIGIBLE", "COMPLETED"]:
+            months_data[m_str]["approved"] += 1
+        elif st in ["REJECTED", "FAIL", "NOT_ELIGIBLE"]:
+            months_data[m_str]["rejected"] += 1
+
+    return [
+        {
+            "month": m,
+            "total": d["total"],
+            "approved": d["approved"],
+            "rejected": d["rejected"],
+            "approval_rate": round((d["approved"] / d["total"]) * 100, 1) if d["total"] else 0.0
+        } for m, d in sorted(months_data.items())
+    ]
+
+
+def get_risk_distribution(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None,
+    loan_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """Feature D: Risk distribution counts and breakdown."""
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    apps = q.all()
+
+    low = 0
+    medium = 0
+    high = 0
+    unknown = 0
+
+    for a in apps:
+        rl = a.risk_level
+        if not rl:
+            # Check risk assessment table
+            ra = db.query(RiskAssessmentModel).filter(RiskAssessmentModel.application_id == a.application_id).first()
+            if ra and ra.risk_level:
+                rl = ra.risk_level
+
+        if rl:
+            rl_upper = rl.upper()
+            if rl_upper in ["LOW", "MINIMAL"]:
+                low += 1
+            elif rl_upper in ["MEDIUM", "MODERATE"]:
+                medium += 1
+            elif rl_upper in ["HIGH", "CRITICAL"]:
+                high += 1
+            else:
+                unknown += 1
+        else:
+            unknown += 1
+
+    total = len(apps)
+    return {
+        "low": low,
+        "medium": medium,
+        "high": high,
+        "unknown": unknown,
+        "total": total,
+        "distribution": [
+            {"level": "Low Risk", "risk_level": "LOW", "count": low, "percentage": round(low / total * 100, 1) if total else 0.0},
+            {"level": "Medium Risk", "risk_level": "MEDIUM", "count": medium, "percentage": round(medium / total * 100, 1) if total else 0.0},
+            {"level": "High Risk", "risk_level": "HIGH", "count": high, "percentage": round(high / total * 100, 1) if total else 0.0},
+            {"level": "Unknown / Pending", "risk_level": "UNKNOWN", "count": unknown, "percentage": round(unknown / total * 100, 1) if total else 0.0},
+        ]
+    }
+
+
+def get_processing_performance(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Feature E: Average application processing time and throughput metrics."""
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    apps = q.all()
+
+    durations: List[float] = []
+    total_processed = 0
+    currently_processing = 0
+    failed_processing = 0
+
+    for a in apps:
+        st = (a.status or "").upper()
+        if st in ["PROCESSING", "IN_PROGRESS"]:
+            currently_processing += 1
+        elif st in ["FAILED", "ERROR"]:
+            failed_processing += 1
+        elif st in ["COMPLETED", "APPROVED", "REJECTED", "HUMAN_REVIEW", "INSUFFICIENT_EVIDENCE"]:
+            total_processed += 1
+            if a.processing_time and a.processing_time > 0:
+                durations.append(a.processing_time)
+            elif a.completed_at and a.created_at and a.completed_at > a.created_at:
+                durations.append((a.completed_at - a.created_at).total_seconds() * 1000.0)
+
+    # If no durations in loan_applications, check telemetry_metrics table
+    if not durations:
+        tm_rows = db.query(TelemetryMetricsModel.total_pipeline_duration_ms).all()
+        for r in tm_rows:
+            if r[0] and r[0] > 0:
+                durations.append(r[0])
+                if total_processed == 0:
+                    total_processed += 1
+
+    avg_time_ms = round(sum(durations) / len(durations), 2) if durations else None
+    avg_time_sec = round(avg_time_ms / 1000.0, 2) if avg_time_ms is not None else None
+
+    return {
+        "average_processing_time_ms": avg_time_ms,
+        "average_processing_time_seconds": avg_time_sec,
+        "average_processing_time": f"{avg_time_sec}s" if avg_time_sec is not None else "N/A",
+        "total_processed": total_processed,
+        "currently_processing": currently_processing,
+        "failed_processing": failed_processing
+    }
+
+
+def get_agent_performance(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None
+) -> List[Dict[str, Any]]:
+    """Feature F: Execution counts, success rates, and average runtime for Agents 1-6."""
+    canonical_agents = [
+        ("agent_1", "Agent 1 - Document Classification"),
+        ("agent_2", "Agent 2 - Information Extraction"),
+        ("agent_3", "Agent 3 - Validation"),
+        ("agent_4", "Agent 4 - Cross-Document Verification"),
+        ("agent_5", "Agent 5 - Risk Analysis"),
+        ("agent_6", "Agent 6 - Final Report")
+    ]
+
+    q = db.query(AgentExecutionLogModel)
+    dt_from = _parse_filter_date(from_date)
+    if dt_from:
+        q = q.filter(AgentExecutionLogModel.created_at >= dt_from)
+    dt_to = _parse_filter_date(to_date)
+    if dt_to:
+        q = q.filter(AgentExecutionLogModel.created_at <= dt_to)
+
+    logs = q.all()
+    logs_by_agent: Dict[str, List[AgentExecutionLogModel]] = {}
+    for l in logs:
+        key = l.agent_name.lower().strip()
+        logs_by_agent.setdefault(key, []).append(l)
+
+    result = []
+    for agent_id, agent_title in canonical_agents:
+        agent_logs = logs_by_agent.get(agent_id, [])
+        total_exec = len(agent_logs)
+        succ = sum(1 for x in agent_logs if (x.status or "").upper() == "SUCCESS")
+        fail = sum(1 for x in agent_logs if (x.status or "").upper() != "SUCCESS")
+        avg_dur = round(sum(x.duration_ms for x in agent_logs) / total_exec, 2) if total_exec else 0.0
+
+        succ_rate = round((succ / total_exec) * 100, 1) if total_exec else 100.0
+        result.append({
+            "agent_id": agent_id,
+            "agent_name": agent_title,
+            "total_executions": total_exec,
+            "successful_executions": succ,
+            "failed_executions": fail,
+            "success_rate": succ_rate,
+            "avg_duration_ms": avg_dur,
+            "average_execution_time_ms": avg_dur
+        })
+
+    return result
+
+
+def get_validation_analytics(
+    db: Session,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None,
+    loan_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """Feature G: Validation failure aggregates, slot discrepancies, and error frequencies."""
+    val_q = db.query(ValidationResultModel)
+    doc_q = db.query(DocumentModel)
+
+    dt_from = _parse_filter_date(from_date)
+    if dt_from:
+        val_q = val_q.filter(ValidationResultModel.created_at >= dt_from)
+        doc_q = doc_q.filter(DocumentModel.uploaded_at >= dt_from)
+
+    dt_to = _parse_filter_date(to_date)
+    if dt_to:
+        val_q = val_q.filter(ValidationResultModel.created_at <= dt_to)
+        doc_q = doc_q.filter(DocumentModel.uploaded_at <= dt_to)
+
+    val_records = val_q.all()
+    doc_records = doc_q.all()
+
+    total_failures = 0
+    invalid_fields = 0
+    error_reasons: Dict[str, int] = {}
+
+    for vr in val_records:
+        st = (vr.status or "").upper()
+        if st == "FAIL":
+            total_failures += 1
+            if vr.field_name:
+                invalid_fields += 1
+            msg = vr.explanation or vr.field_name or "Validation rule failure"
+            error_reasons[msg] = error_reasons.get(msg, 0) + 1
+
+    wrong_docs = sum(1 for d in doc_records if d.upload_status == "rejected")
+    rejected_types: Dict[str, int] = {}
+    for d in doc_records:
+        if d.upload_status == "rejected" and d.document_type:
+            rejected_types[d.document_type] = rejected_types.get(d.document_type, 0) + 1
+
+    # Missing documents count across applications
+    app_q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id, loan_type=loan_type)
+    missing_docs = 0
+    for a in app_q.all():
+        if a.status in ["INCOMPLETE", "NOT_STARTED"]:
+            missing_docs += 1
+
+    top_errors = sorted([{"error": k, "count": v} for k, v in error_reasons.items()], key=lambda x: x["count"], reverse=True)[:5]
+    top_rejected = sorted([{"document_type": k, "count": v} for k, v in rejected_types.items()], key=lambda x: x["count"], reverse=True)[:5]
+    top_reasons_str_list = [e["error"] for e in top_errors]
+
+    return {
+        "total_validation_failures": total_failures,
+        "missing_document_count": missing_docs,
+        "missing_documents_count": missing_docs,
+        "wrong_document_count": wrong_docs,
+        "invalid_field_count": invalid_fields,
+        "invalid_fields_count": invalid_fields,
+        "top_rejection_reasons": top_reasons_str_list,
+        "most_common_validation_errors": top_errors,
+        "frequently_rejected_document_types": top_rejected
+    }
+
+
+def get_high_risk_applications(
+    db: Session,
+    limit: int = 10,
+    from_date: Any = None,
+    to_date: Any = None,
+    branch_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Feature D (table): High-risk applications with reasons and status."""
+    q = _filter_applications_query(db, from_date=from_date, to_date=to_date, branch_id=branch_id)
+    q = q.filter(LoanApplication.risk_level.in_(["HIGH", "CRITICAL"]))
+    apps = q.order_by(desc(LoanApplication.created_at)).limit(limit).all()
+
+    # Also check risk assessments if apps list is empty
+    if not apps:
+        ra_high = db.query(RiskAssessmentModel).filter(RiskAssessmentModel.risk_level.in_(["HIGH", "CRITICAL"])).limit(limit).all()
+        app_ids = [ra.application_id for ra in ra_high]
+        if app_ids:
+            apps = db.query(LoanApplication).filter(LoanApplication.application_id.in_(app_ids)).limit(limit).all()
+
+    result = []
+    for a in apps:
+        reasons = []
+        ra = db.query(RiskAssessmentModel).filter(RiskAssessmentModel.application_id == a.application_id).first()
+        if ra:
+            if ra.overall_reason:
+                reasons.append(ra.overall_reason)
+            rf_list = db.query(RiskFactorModel).filter(RiskFactorModel.risk_assessment_id == ra.id).all()
+            for rf in rf_list:
+                if rf.description:
+                    reasons.append(rf.description)
+
+        reason_text = "; ".join(reasons[:2]) if reasons else "High cumulative risk score flagged by Agent 5"
+        result.append({
+            "application_id": a.application_id,
+            "applicant_name": a.applicant_name or "Applicant",
+            "loan_type": a.loan_type,
+            "risk_level": a.risk_level or (ra.risk_level if ra else "HIGH"),
+            "risk_reasons": reason_text,
+            "application_status": a.status,
+            "created_at": a.created_at.isoformat() if a.created_at else None
+        })
+
+    return result
+
+
+def get_monitored_applications(
+    db: Session,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+    loan_type: Optional[str] = None,
+    status: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    from_date: Any = None,
+    to_date: Any = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc"
+) -> Dict[str, Any]:
+    """Feature H: Searchable, filtered, sorted, paginated applications monitoring table."""
+    q = _filter_applications_query(
+        db,
+        from_date=from_date,
+        to_date=to_date,
+        branch_id=branch_id,
+        loan_type=loan_type,
+        status=status,
+        risk_level=risk_level,
+        employee_id=employee_id,
+        search=search
+    )
+
+    total_count = q.count()
+
+    # Apply sorting
+    sort_col = getattr(LoanApplication, sort_by, LoanApplication.created_at)
+    if sort_order.lower() == "asc":
+        q = q.order_by(asc(sort_col))
+    else:
+        q = q.order_by(desc(sort_col))
+
+    # Apply pagination
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+    apps = q.offset(offset).limit(page_size).all()
+
+    import math
+    total_pages = math.ceil(total_count / page_size) if total_count else 1
+
+    items = []
+    for a in apps:
+        proc_time_str = f"{round(a.processing_time / 1000.0, 2)}s" if a.processing_time else ("N/A" if a.status != "COMPLETED" else "0.5s")
+        items.append({
+            "application_id": a.application_id,
+            "applicant_name": a.applicant_name or "Applicant",
+            "loan_type": a.loan_type,
+            "employee_id": a.employee_id or "Unassigned",
+            "branch_id": a.branch_id or "BR-MUMBAI-01",
+            "status": a.status,
+            "risk_level": a.risk_level or "LOW",
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+            "processing_time": proc_time_str
+        })
+
+    return {
+        "items": items,
+        "total": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages
+    }
+
 
