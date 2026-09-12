@@ -401,16 +401,22 @@ def build_pdf_report_bytes(
         ]
         for c in class_list:
             fname = get_obj_attr(c, "filename", "document.pdf")
-            dtype = get_obj_attr(c, "document_type", "unknown")
+            raw_dtype = get_obj_attr(c, "document_type", "unknown")
+            norm_dtype = get_obj_attr(c, "normalized_document_type", raw_dtype)
             conf = get_obj_attr(c, "confidence", 0.0)
             conf_str = f"{conf*100:.0f}%" if isinstance(conf, (int, float)) else "N/A"
             reason = get_obj_attr(c, "classification_reason", "Verified")
+            c_status = get_obj_attr(c, "upload_status") or get_obj_attr(c, "status")
+            if not c_status:
+                c_status = "ACCEPTED" if norm_dtype not in ["unknown", "other"] and conf >= 0.70 else "WRONG DOCUMENT"
+            c_status_upper = str(c_status).upper()
+            status_color = "#15803d" if c_status_upper in ["ACCEPTED", "SUCCESS"] else "#b91c1c"
 
             class_table_data.append([
                 Paragraph(fname, style_cell_body),
                 Paragraph(str(reason)[:35], style_cell_body),
-                Paragraph(f"<b>{dtype.replace('_', ' ').title()}</b>", style_cell_body_bold),
-                Paragraph("<font color='#15803d'>ACCEPTED</font>", style_cell_body),
+                Paragraph(f"<b>{norm_dtype.replace('_', ' ').title()}</b>", style_cell_body_bold),
+                Paragraph(f"<font color='{status_color}'>{c_status_upper}</font>", style_cell_body),
                 Paragraph(conf_str, style_cell_body)
             ])
 

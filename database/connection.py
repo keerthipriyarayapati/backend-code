@@ -52,6 +52,28 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created successfully.")
 
+    # Auto-migrate documents table schema if needed
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            res = conn.execute(text("PRAGMA table_info(documents)")).fetchall()
+            existing_cols = {row[1] for row in res}
+            
+            if "is_active" not in existing_cols:
+                conn.execute(text("ALTER TABLE documents ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+                conn.commit()
+                logger.info("Migrated documents table: added is_active column.")
+            if "ocr_success" not in existing_cols:
+                conn.execute(text("ALTER TABLE documents ADD COLUMN ocr_success BOOLEAN DEFAULT 0"))
+                conn.commit()
+                logger.info("Migrated documents table: added ocr_success column.")
+            if "extraction_error" not in existing_cols:
+                conn.execute(text("ALTER TABLE documents ADD COLUMN extraction_error VARCHAR(100)"))
+                conn.commit()
+                logger.info("Migrated documents table: added extraction_error column.")
+    except Exception as e:
+        logger.warning(f"Column migration check encountered: {e}")
+
     # Seed document requirements
     try:
         from database.seed import seed_document_requirements

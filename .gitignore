@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+uploads/
+data/*.db
+scratch/test_edu_files/

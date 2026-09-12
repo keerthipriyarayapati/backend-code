@@ -426,10 +426,10 @@
       const loanTitle = document.getElementById('loanChecklistTitle');
       loanTitle.innerText = `${currentPolicy.display_name.toUpperCase()} DOCUMENT CHECKLIST`;
 
-      const reqUploaded = currentAppStatus.uploaded_required_documents_count || 0;
-      const reqTotal = currentAppStatus.required_documents_count || 0;
-      const wrongCount = currentAppStatus.wrong_documents_count || 0;
-      const missingCount = currentAppStatus.missing_required_documents_count || (reqTotal - reqUploaded);
+      const reqUploaded = currentAppStatus.uploaded_required_documents_count ?? 0;
+      const reqTotal = currentAppStatus.required_documents_count ?? 0;
+      const wrongCount = currentAppStatus.wrong_documents_count ?? 0;
+      const missingCount = currentAppStatus.missing_required_documents_count ?? Math.max(0, reqTotal - reqUploaded - wrongCount);
       const isReady = currentAppStatus.application_status === 'READY_FOR_PROCESSING' || currentAppStatus.application_status === 'COMPLETED';
 
       const progressText = document.getElementById('checklistProgress');
@@ -445,7 +445,11 @@
         processSub.innerText = 'All required document slots satisfied. Click to run extraction and validation.';
         processBtn.disabled = false;
       } else {
-        processTitle.innerHTML = `<span style="color: #f87171;">⚠️ INCOMPLETE (${missingCount} Required Document${missingCount > 1 ? 's' : ''} Missing / ${wrongCount} Wrong)</span>`;
+        let issues = [];
+        if (missingCount > 0) issues.push(`${missingCount} Missing`);
+        if (wrongCount > 0) issues.push(`${wrongCount} Wrong`);
+        const issueStr = issues.length > 0 ? issues.join(' / ') : 'Incomplete';
+        processTitle.innerHTML = `<span style="color: #f87171;">⚠️ INCOMPLETE (${issueStr})</span>`;
         processSub.innerText = 'Upload all mandatory required document slots to continue.';
         processBtn.disabled = true;
       }
@@ -463,23 +467,66 @@
       });
     }
 
+    const CANONICAL_LABELS = {
+      'student_kyc': 'Student KYC / Identity',
+      'co_applicant_kyc': 'Co-applicant KYC / Identity',
+      'pan_card': 'PAN Card',
+      'aadhaar_identity': 'Aadhaar Card',
+      'passport_identity': 'Passport',
+      'voter_id': 'Voter ID',
+      'voter_identity': 'Voter ID',
+      'driving_license': 'Driving License',
+      'kyc_identity': 'Government Photo ID / KYC',
+      'property_title_document': 'Property Title Document / Deed',
+      'sale_deed': 'Sale Deed / Conveyance Deed',
+      'property_registration_document': 'Property Registration Document',
+      'property_valuation_report': 'Property Valuation Report',
+      'property_tax_receipt': 'Property Tax Receipt',
+      'land_ownership_document': 'Land Ownership Record (Patta/Chitta/7-12)',
+      'sale_agreement': 'Sale Agreement / Agreement to Sell',
+      'approved_building_plan': 'Approved Building Plan',
+      'agricultural_income_proof': 'Agricultural Income Proof',
+      'cultivation_record': 'Cultivation / Crop Record',
+      'payslip': 'Salary Payslip',
+      'salary_certificate': 'Salary Certificate / Employment Income',
+      'employment_income_proof': 'Employment Income Proof',
+      'income_proof': 'Income Proof',
+      'itr_tax_return': 'Income Tax Return (ITR)',
+      'form_16': 'Form 16 TDS Certificate',
+      'bank_statement': 'Bank Statement',
+      'product_quotation': 'Product / Purchase Quotation',
+      'consumer_durable_quotation': 'Consumer Durable Quotation',
+      'product_invoice': 'Product / Store Invoice',
+      'purchase_invoice': 'Purchase Invoice',
+      'cd_kyc': 'KYC / Identity Proof',
+      'cd_pan': 'PAN Card',
+      'cd_income': 'Income Proof',
+      'cd_bank': 'Bank Statement',
+      'cd_quotation': 'Product Quotation',
+      'office_id': 'Company / Office ID',
+      'employment_certificate': 'Employment Certificate',
+      'employment_letter': 'Employment Offer / Appointment Letter',
+      'address_proof': 'Address Proof (Utility Bill / Tenancy)'
+    };
+
     function createSlotCard(req, status, isRequired) {
       const card = document.createElement('div');
       let statusClass = '';
 
-      if (status.status === 'accepted') statusClass = 'accepted';
-      else if (status.status === 'wrong_document') statusClass = 'wrong_document';
-      else if (status.status === 'duplicate') statusClass = 'duplicate';
+      const hasDoc = Boolean(status.uploaded_filename || status.uploaded_document_id);
+      const isValid = status.is_valid_for_slot === true || status.status === 'accepted' || status.slot_status === 'accepted';
+      const isWrong = status.wrong_document === true || status.status === 'wrong_document' || status.slot_status === 'rejected';
+      const isDuplicate = status.status === 'duplicate';
+
+      if (isValid) statusClass = 'accepted';
+      else if (hasDoc && isWrong) statusClass = 'wrong_document';
+      else if (isDuplicate) statusClass = 'duplicate';
 
       card.className = `slot-card ${statusClass}`;
 
       // Map raw canonical types to clean human-friendly names
       const humanTypes = (req.accepted_document_types || []).map(t => {
-        if (t === 'office_id' || t === 'employee_id' || t === 'company_id') return 'Company / Office ID';
-        if (t === 'employment_letter') return 'Employment Letter';
-        if (t === 'employment_certificate') return 'Employment Certificate';
-        if (t === 'employment_proof') return 'Employment Proof';
-        return t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        return CANONICAL_LABELS[t] || t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
       });
 
       // Deduplicate human type names
@@ -489,12 +536,12 @@
       const isEmploymentProof = req.requirement_id.includes('emp_proof') || req.requirement_id.includes('emp_letter') || req.display_name.toLowerCase().includes('employment');
 
       let statusBadge = `<span style="color: var(--text-muted); font-size: 0.8rem; font-weight: 600;">○ Pending Upload</span>`;
-      if (status.status === 'accepted') {
+      if (isValid) {
         const acceptText = isEmploymentProof ? '✓ Employment document verified' : '✓ Accepted';
         statusBadge = `<span style="color: #4ade80; font-size: 0.85rem; font-weight: 700;">${acceptText}</span>`;
-      } else if (status.status === 'wrong_document') {
+      } else if (hasDoc && isWrong) {
         statusBadge = `<span style="color: #f87171; font-size: 0.85rem; font-weight: 700;">✕ WRONG DOCUMENT</span>`;
-      } else if (status.status === 'duplicate') {
+      } else if (isDuplicate) {
         statusBadge = `<span style="color: #fde047; font-size: 0.85rem; font-weight: 700;">⚠️ Duplicate</span>`;
       }
 
@@ -505,10 +552,10 @@
 
       let fileInfoHtml = '';
       if (status.uploaded_filename) {
-        const rawDet = status.detected_document_type || 'unknown';
-        const detLabel = rawDet.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        const rawDet = status.canonical_document_type || status.detected_document_type || 'unknown';
+        const detLabel = status.display_document_type || CANONICAL_LABELS[rawDet] || rawDet.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
         const conf = status.confidence ? `(${(status.confidence * 100).toFixed(0)}%)` : '';
-        const detColor = status.status === 'wrong_document' ? '#f87171' : 'var(--accent)';
+        const detColor = (hasDoc && isWrong) ? '#f87171' : 'var(--accent)';
         const docIdParam = status.uploaded_document_id || '';
         const linksHtml = docIdParam ? `
           <div style="display: flex; gap: 8px; margin-top: 6px;">

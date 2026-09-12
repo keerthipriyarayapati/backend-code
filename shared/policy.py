@@ -28,8 +28,14 @@ class DocumentSlotStatus(BaseModel):
     uploaded_filename: Optional[str] = None
     file_path: Optional[str] = None
     detected_document_type: Optional[str] = None
+    canonical_document_type: Optional[str] = None
+    display_document_type: Optional[str] = None
+    is_valid_for_slot: bool = False
+    slot_status: str = Field(default="pending", description="One of: pending, accepted, rejected")
+    wrong_document: bool = False
     confidence: Optional[float] = None
     error: Optional[str] = None
+
 
 
 class ApplicationDocumentStatus(BaseModel):
@@ -567,45 +573,253 @@ LOAN_DOCUMENT_POLICY: Dict[str, Dict[str, List[DocumentRequirement]]] = {
             DocumentRequirement(
                 requirement_id="cd_kyc",
                 display_name="KYC / Identity Proof",
-                accepted_document_types=["kyc_identity", "aadhaar_identity", "voter_id_identity"],
-                required=True
+                accepted_document_types=[
+                    "kyc_identity",
+                    "aadhaar_identity",
+                    "passport_identity",
+                    "voter_id",
+                    "driving_license"
+                ],
+                required=True,
+                description="Government-issued photo identity proof"
             ),
             DocumentRequirement(
                 requirement_id="cd_pan",
                 display_name="PAN Card",
-                accepted_document_types=["pan_card"],
-                required=True
+                accepted_document_types=[
+                    "pan_card"
+                ],
+                required=True,
+                description="Permanent Account Number (PAN) Card"
             ),
             DocumentRequirement(
                 requirement_id="cd_income",
                 display_name="Income Proof",
-                accepted_document_types=["payslip", "salary_certificate", "itr_tax_return"],
-                required=True
+                accepted_document_types=[
+                    "payslip",
+                    "salary_certificate",
+                    "employment_income_proof",
+                    "itr_tax_return"
+                ],
+                required=True,
+                description="Payslip, Salary Certificate, or ITR Tax Return"
             ),
             DocumentRequirement(
                 requirement_id="cd_bank",
                 display_name="Bank Statement",
-                accepted_document_types=["bank_statement"],
-                required=True
+                accepted_document_types=[
+                    "bank_statement"
+                ],
+                required=True,
+                description="Bank account statement"
             ),
             DocumentRequirement(
                 requirement_id="cd_quotation",
                 display_name="Product Quotation",
-                accepted_document_types=["product_quotation"],
+                accepted_document_types=[
+                    "product_quotation",
+                    "consumer_durable_quotation",
+                    "product_invoice"
+                ],
                 required=True,
                 description="Store proforma invoice / quotation"
             )
         ],
-        "optional": [
-            DocumentRequirement(
-                requirement_id="cd_invoice",
-                display_name="Product Invoice",
-                accepted_document_types=["product_invoice", "purchase_invoice"],
-                required=False
-            )
-        ]
+        "optional": []
     }
 }
+
+
+CANONICAL_DOCUMENT_TYPES = {
+    # KYC / Identity
+    "kyc_identity", "student_kyc", "co_applicant_kyc", "aadhaar_identity",
+    "pan_card", "passport_identity", "voter_identity", "voter_id", "driving_license",
+
+    # Income / Employment
+    "payslip", "salary_certificate", "employment_income_proof", "income_proof",
+    "agricultural_income_proof", "itr_tax_return", "form_16",
+    "employment_letter", "employment_certificate", "office_id", "employee_id",
+    "company_id", "employment_proof", "income_certificate", "co_applicant_income_proof",
+
+    # Banking
+    "bank_statement", "business_bank_statement",
+
+    # Property
+    "property_title_document", "sale_deed", "sale_agreement",
+    "property_registration_document", "property_valuation_report",
+    "property_tax_receipt", "approved_building_plan", "land_ownership_document",
+    "land_record", "land_tax_receipt", "encumbrance_certificate",
+
+    # Vehicle
+    "vehicle_quotation", "vehicle_invoice", "vehicle_purchase_agreement",
+    "vehicle_registration_document", "vehicle_insurance_document",
+
+    # Education
+    "admission_letter", "fee_structure", "academic_certificate", "marksheet",
+
+    # Business
+    "business_registration", "gst_certificate", "gst_return", "business_itr",
+    "profit_loss_statement", "balance_sheet", "partnership_deed", "incorporation_certificate",
+    "business_license",
+
+    # Gold / FD / Consumer
+    "gold_security_document", "jewellery_valuation_report", "pledge_document",
+    "fixed_deposit_certificate", "fixed_deposit_receipt", "fd_statement", "fd_loan_document",
+    "product_quotation", "consumer_durable_quotation", "product_invoice", "purchase_invoice",
+
+    # Status Types
+    "other", "unknown"
+}
+
+
+CANONICAL_LABELS: Dict[str, str] = {
+    "student_kyc": "Student KYC / Identity",
+    "co_applicant_kyc": "Co-applicant KYC / Identity",
+    "kyc_identity": "KYC / Identity Proof",
+    "pan_card": "PAN Card",
+    "aadhaar_identity": "Aadhaar Card",
+    "passport_identity": "Passport",
+    "voter_id": "Voter ID",
+    "voter_identity": "Voter ID",
+    "driving_license": "Driving License",
+    "payslip": "Salary Payslip",
+    "salary_certificate": "Salary Certificate",
+    "employment_income_proof": "Employment Income Proof",
+    "income_proof": "Income Proof",
+    "itr_tax_return": "Income Tax Return (ITR)",
+    "form_16": "Form 16 TDS Certificate",
+    "bank_statement": "Bank Statement",
+    "business_bank_statement": "Business Bank Statement",
+    "product_quotation": "Product Quotation",
+    "consumer_durable_quotation": "Consumer Durable Quotation",
+    "product_invoice": "Product Invoice",
+    "purchase_invoice": "Purchase Invoice",
+    "property_title_document": "Property Title Document",
+    "sale_deed": "Sale Deed",
+    "sale_agreement": "Sale Agreement",
+    "property_registration_document": "Property Registration Document",
+    "property_valuation_report": "Property Valuation Report",
+    "property_tax_receipt": "Property Tax Receipt",
+    "approved_building_plan": "Approved Building Plan",
+    "land_ownership_document": "Land Ownership Record",
+    "agricultural_income_proof": "Agricultural Income Proof",
+    "cd_kyc": "KYC / Identity Proof",
+    "cd_pan": "PAN Card",
+    "cd_income": "Income Proof",
+    "cd_bank": "Bank Statement",
+    "cd_quotation": "Product Quotation"
+}
+
+
+def get_display_document_type(doc_type: Optional[str]) -> str:
+    """Returns clean human-friendly display name for a canonical document type."""
+    if not doc_type:
+        return "Unknown Document"
+    norm = normalize_document_type(doc_type)
+    return CANONICAL_LABELS.get(norm, norm.replace("_", " ").title())
+
+
+
+def normalize_document_type(raw_type: Optional[str], requirement_id: Optional[str] = None, loan_type: Optional[str] = None) -> str:
+    """
+    Canonical Document Type Normalization Engine.
+    Maps raw classifications, uppercase enum names, and UI labels to standardized canonical identifiers.
+    Never silently converts unknown enum values into 'other'.
+    """
+    if not raw_type:
+        return "unknown"
+
+    cleaned = str(raw_type).strip()
+    lower = cleaned.lower().replace("-", "_").replace(" ", "_").replace("/", "_")
+    # Collapse consecutive underscores
+    while "__" in lower:
+        lower = lower.replace("__", "_")
+    lower = lower.strip("_")
+
+    # Consumer Durable Loan canonical normalization
+    if lower in ["cd_kyc", "consumer_durable_kyc"]:
+        return "kyc_identity"
+    if lower in ["cd_pan", "consumer_durable_pan"]:
+        return "pan_card"
+    if lower in ["cd_income", "consumer_durable_income"]:
+        return "income_proof"
+    if lower in ["cd_bank", "consumer_durable_bank"]:
+        return "bank_statement"
+    if lower in ["cd_quotation", "consumer_durable_quotation"]:
+        return "product_quotation"
+
+    # Direct canonical match
+    if lower in CANONICAL_DOCUMENT_TYPES:
+        return lower
+
+    # Specific KYC Normalization
+    if lower in ["student_kyc", "student_identity", "student_id", "student_id_card", "student_pan_or_identity_record"]:
+        return "student_kyc"
+    if lower in ["co_applicant_kyc", "coapplicant_kyc", "co_app_kyc", "co_applicant_identity"]:
+        return "co_applicant_kyc"
+    if lower in ["pan_card", "pan", "permanent_account_number", "pan_document"]:
+        return "pan_card"
+    if lower in ["aadhaar_identity", "aadhaar_card", "aadhaar", "uidai", "aadhar", "aadhar_card"]:
+        return "aadhaar_identity"
+    if lower in ["passport_identity", "passport", "indian_passport"]:
+        return "passport_identity"
+    if lower in ["voter_id", "voter_identity", "voter_id_identity", "epic_card", "election_card"]:
+        return "voter_id"
+    if lower in ["driving_license", "driving_licence", "driving_license_identity", "driving_licence_identity", "dl"]:
+        return "driving_license"
+    if lower in ["kyc_identity", "kyc", "identity_proof", "photo_identity", "government_identity", "sample_identity_proof", "kyc_document"]:
+        return "kyc_identity"
+
+    # Specific Property Normalization
+    if lower in [
+        "property_title_document", "property_title", "title_deed", "property_or_title_documents",
+        "property_and_title_documents", "property_documents", "property_document",
+        "title_document", "title_documents", "ownership_deed"
+    ]:
+        return "property_title_document"
+    if lower in ["sale_deed", "conveyance_deed", "deed_of_sale"]:
+        return "sale_deed"
+    if lower in ["property_registration_document", "registration_document", "registered_sale_deed"]:
+        return "property_registration_document"
+    if lower in ["property_valuation_report", "valuation_report", "property_valuation", "real_estate_valuation"]:
+        return "property_valuation_report"
+    if lower in ["property_tax_receipt", "property_tax", "municipal_tax_receipt", "tax_receipt"]:
+        return "property_tax_receipt"
+    if lower in ["land_ownership_document", "land_record", "land_records", "patta", "chitta", "7_12", "7_12_extract"]:
+        return "land_ownership_document"
+    if lower in ["sale_agreement", "agreement_for_sale", "builder_buyer_agreement"]:
+        return "sale_agreement"
+    if lower in ["approved_building_plan", "building_plan", "approved_plan", "sanctioned_plan"]:
+        return "approved_building_plan"
+
+    # Specific Income Normalization
+    if lower in ["agricultural_income_proof", "agricultural_income_document", "agri_income", "agricultural_income"]:
+        return "agricultural_income_proof"
+    if lower in ["payslip", "salary_slip", "pay_slip", "salary_slip_august", "monthly_payslip"]:
+        return "payslip"
+    if lower in ["salary_certificate", "salary_letter", "income_certificate", "employment_income_proof"]:
+        return "salary_certificate"
+    if lower in ["itr_tax_return", "itr", "income_tax_return", "itr_1", "tax_return"]:
+        return "itr_tax_return"
+    if lower in ["form_16", "form16", "tds_certificate"]:
+        return "form_16"
+    if lower in ["bank_statement", "account_statement", "bank_details"]:
+        return "bank_statement"
+
+    # Requirement Context Resolution for generic KYC
+    if lower in ["kyc", "identity"] and requirement_id:
+        if "student" in requirement_id:
+            return "student_kyc"
+        if "co_app" in requirement_id or "coapplicant" in requirement_id:
+            return "co_applicant_kyc"
+
+    # Preserve unknown or other explicitly
+    if lower in ["other", "others"]:
+        return "other"
+    if lower in ["unknown", "unreadable", "unsupported", "corrupted"]:
+        return "unknown"
+
+    return lower
 
 
 def get_loan_type_policy(loan_type: str) -> Dict[str, List[DocumentRequirement]]:
@@ -621,30 +835,116 @@ def is_document_acceptable_for_requirement(detected_doc_type: str, requirement: 
     """
     Semantic Resolver: Evaluates whether a detected Agent 1 document classification type
     is acceptable for satisfying a specified document requirement slot.
+    Strictly prevents cross-domain pollution (e.g. agricultural income into salary slots).
     """
     if not detected_doc_type or not requirement:
         return False
 
-    det = detected_doc_type.lower().strip()
-    accepted = [a.lower().strip() for a in requirement.accepted_document_types]
+    det = normalize_document_type(detected_doc_type, requirement.requirement_id)
+    accepted_raw = requirement.accepted_document_types or []
+    accepted = [normalize_document_type(a) for a in accepted_raw]
 
+    # Exact normalized match
     if det in accepted:
         return True
 
-    # Generic semantic aliasing rules
-    if det == "pan_card" and any(a == "pan_card" or a == "pan" or a.startswith("pan_") for a in accepted):
+    # =========================================================================
+    # CONSUMER DURABLE LOAN SLOT ENFORCEMENT (EXACT 5 CANONICAL SLOTS)
+    # =========================================================================
+    if requirement.requirement_id == "cd_kyc":
+        return det in {"kyc_identity", "aadhaar_identity", "passport_identity", "voter_id", "voter_identity", "driving_license"}
+
+    if requirement.requirement_id == "cd_pan":
+        return det == "pan_card"
+
+    if requirement.requirement_id == "cd_income":
+        return det in {"payslip", "salary_certificate", "employment_income_proof", "itr_tax_return", "income_proof"}
+
+    if requirement.requirement_id == "cd_bank":
+        return det == "bank_statement"
+
+    if requirement.requirement_id == "cd_quotation":
+        return det in {"product_quotation", "consumer_durable_quotation", "product_invoice", "purchase_invoice", "store_invoice"}
+
+
+    # =========================================================================
+    # STRICT AGRICULTURAL INCOME PROOF RULE (CRITICAL DOMAIN GUARD)
+    # =========================================================================
+    # Agricultural Income Proof is ONLY acceptable for agricultural income slots.
+    # It must NEVER be accepted for salary/employment slots (Home Loan, Vehicle Loan, LAP, etc.)
+    if det == "agricultural_income_proof":
+        return "agricultural_income_proof" in accepted
+
+    # If the slot explicitly requires agricultural income proof, salary proofs are invalid
+    if "agricultural_income_proof" in accepted and det not in ["agricultural_income_proof"]:
+        return False
+
+    # =========================================================================
+    # PROPERTY DOCUMENT BOUNDARY RULES
+    # =========================================================================
+    # Property Title slots accept property title, sale deed, or property registration
+    property_title_family = {"property_title_document", "sale_deed", "property_registration_document"}
+    if det in property_title_family and any(a in property_title_family for a in accepted):
         return True
-    if det in ["payslip", "salary_certificate", "employment_income_proof", "itr_tax_return", "form_16"] and any(
-        kw in a for a in accepted for kw in ["income", "payslip", "salary", "itr", "form_16"]
-    ):
+
+    # Property Valuation Reports and Property Tax Receipts are separate and MUST NOT satisfy Title slots
+    if det in ["property_valuation_report", "property_tax_receipt"] and not any(a == det for a in accepted):
+        return False
+
+    # Land ownership document (patta/7-12) satisfies land_record slots, NOT residential home loan title slots
+    if det in ["land_ownership_document", "land_record"] and any(a in ["land_ownership_document", "land_record"] for a in accepted):
         return True
-    if det in ["kyc_identity", "aadhaar_identity", "passport_identity", "driving_license_identity", "voter_id_identity"] and any(
-        kw in a for a in accepted for kw in ["kyc", "identity", "pan", "aadhaar", "passport"]
-    ):
+
+    # =========================================================================
+    # KYC & IDENTITY FAMILY RULES
+    # =========================================================================
+    kyc_identity_family = {
+        "kyc_identity", "aadhaar_identity", "passport_identity",
+        "driving_license", "voter_identity"
+    }
+
+    # Student KYC slot accepts student_kyc or valid student identity documents
+    if requirement.requirement_id == "edu_loan_student_kyc":
+        if det in ["student_kyc", "kyc_identity", "aadhaar_identity", "passport_identity", "voter_identity", "driving_license"]:
+            return True
+        return False
+
+    # Co-applicant KYC slot accepts co_applicant_kyc or co-applicant government ID
+    if requirement.requirement_id == "edu_loan_co_app_kyc":
+        if det in ["co_applicant_kyc", "kyc_identity", "pan_card", "aadhaar_identity", "passport_identity", "voter_identity", "driving_license"]:
+            return True
+        return False
+
+    # PAN Card specific slot
+    if any(a == "pan_card" for a in accepted):
+        if det == "pan_card":
+            return True
+        return False
+
+    # General KYC / Identity Proof slot
+    if any(a in kyc_identity_family or a == "kyc_identity" for a in accepted):
+        if det in kyc_identity_family:
+            return True
+        # PAN card is accepted as KYC identity proof if slot allows
+        if det == "pan_card" and any(a == "pan_card" or "kyc" in a for a in accepted):
+            return True
+
+    # =========================================================================
+    # INCOME / EMPLOYMENT FAMILY RULES
+    # =========================================================================
+    salary_income_family = {"payslip", "salary_certificate", "employment_income_proof", "itr_tax_return", "form_16"}
+    if det in salary_income_family:
+        if any(a in salary_income_family or "income" in a for a in accepted):
+            return True
+
+    # Employment proof / letter
+    employment_proof_family = {"employment_letter", "employment_certificate", "office_id", "employee_id", "company_id", "employment_proof"}
+    if det in employment_proof_family and any(a in employment_proof_family for a in accepted):
         return True
-    if det in ["employment_letter", "employment_certificate", "office_id", "employee_id", "company_id", "employment_proof"] and any(
-        kw in a for a in accepted for kw in ["employment", "emp", "letter", "certificate", "office_id", "employee_id", "company_id"]
-    ):
+
+    # Bank statement
+    if det in ["bank_statement", "business_bank_statement"] and any("bank" in a for a in accepted):
         return True
 
     return False
+

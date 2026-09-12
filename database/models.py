@@ -85,6 +85,9 @@ class DocumentModel(Base):
     upload_status = Column(String(50), default="accepted", nullable=False)  # accepted, pending, wrong_document, duplicate, error
     extraction_method = Column(String(100), nullable=True)
     ocr_used = Column(Boolean, default=False, nullable=False)
+    ocr_success = Column(Boolean, default=False, nullable=False)
+    extraction_error = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
     text_quality = Column(String(50), nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

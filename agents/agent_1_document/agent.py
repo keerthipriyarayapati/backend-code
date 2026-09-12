@@ -45,10 +45,12 @@ from langgraph.graph import StateGraph, START, END
 # Import shared pipeline state
 try:
     from shared.state import DocumentClassificationResult, LoanDocumentState, DocumentContent
+    from shared.policy import normalize_document_type, CANONICAL_DOCUMENT_TYPES
 except ImportError:
     # Fallback import if package path is resolved differently
     sys.path.append(str(Path(__file__).resolve().parents[2]))
     from shared.state import DocumentClassificationResult, LoanDocumentState, DocumentContent
+    from shared.policy import normalize_document_type, CANONICAL_DOCUMENT_TYPES
 
 # Format specific libraries
 import pymupdf  # Modern PyMuPDF API (DO NOT use deprecated fitz)
@@ -187,38 +189,73 @@ def validate_file_security(file_path: str) -> Tuple[bool, Optional[str], Optiona
 # =============================================================================
 
 class DocumentParser:
-    """Safe format-specific document text and metadata parser."""
+    """Safe format-specific document text and metadata parser with native-first extraction and OCR fallback."""
 
     @staticmethod
-    def parse_pdf(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
-        """Parses PDF files using PyMuPDF (import pymupdf)."""
+    def parse_pdf(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
+        """
+        Parses PDF files:
+        1. Native text extraction via PyMuPDF (preserving page numbers).
+        2. Text quality check.
+        3. If empty or unusable (<30 chars), falls back to OCR.
+        """
         try:
             doc = pymupdf.open(file_path)
             if doc.is_encrypted:
-                return "", 0, "encrypted", False, "password_protected_pdf"
+                return "", 0, "encrypted", False, "pdf_encrypted", "password_protected_pdf"
 
             page_count = len(doc)
             text_chunks = []
 
-            for page in doc:
-                text = page.get_text("text")
-                if text:
-                    text_chunks.append(text)
+            for page_idx, page in enumerate(doc):
+                page_text = page.get_text("text") or ""
+                if page_text.strip():
+                    text_chunks.append(f"--- PAGE {page_idx + 1} ---\n{page_text.strip()}")
 
-            full_text = "\n".join(text_chunks).strip()
+            full_text = "\n\n".join(text_chunks).strip()
+            clean_text = re.sub(r"--- PAGE \d+ ---", "", full_text).strip()
+
+            # Usability check: digital PDFs with readable text
+            if len(clean_text) >= 30:
+                doc.close()
+                quality = "good" if len(clean_text) > 100 else "sparse"
+                return full_text, page_count, quality, True, "pdf_text", None
+
+            # OCR fallback on scanned or empty PDF pages
+            logger.info(f"Native text insufficient ({len(clean_text)} chars). Triggering OCR fallback for {file_path}")
+            ocr_chunks = []
+            ocr_failed = False
+
+            try:
+                import pytesseract
+                for page_idx, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=150)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    page_ocr = pytesseract.image_to_string(img).strip()
+                    if page_ocr:
+                        ocr_chunks.append(f"--- PAGE {page_idx + 1} ---\n{page_ocr}")
+            except Exception as ocr_err:
+                logger.warning(f"OCR fallback failed on PDF {file_path}: {ocr_err}")
+                ocr_failed = True
+
             doc.close()
 
-            if not full_text:
-                return "", page_count, "empty/scanned", False, None
+            ocr_full_text = "\n\n".join(ocr_chunks).strip()
+            ocr_clean = re.sub(r"--- PAGE \d+ ---", "", ocr_full_text).strip()
 
-            quality = "good" if len(full_text) > 100 else "sparse"
-            return full_text, page_count, quality, True, None
+            if len(ocr_clean) >= 30:
+                quality = "good" if len(ocr_clean) > 100 else "sparse"
+                return ocr_full_text, page_count, quality, True, "pdf_ocr", None
+
+            err_code = "OCR_FAILED" if ocr_failed or not ocr_full_text else "TEXT_NOT_AVAILABLE"
+            return "", page_count, "unusable", False, "pdf_ocr_failed", err_code
+
         except Exception as e:
             logger.error(f"PyMuPDF failed to parse {file_path}: {e}")
-            return "", 0, "corrupted", False, "corrupted_pdf"
+            return "", 0, "corrupted", False, "pdf_corrupted", "corrupted_pdf"
 
     @staticmethod
-    def parse_docx(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
+    def parse_docx(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
         """Parses DOCX files using python-docx with paragraph and table support."""
         try:
             doc = docx.Document(file_path)
@@ -240,22 +277,21 @@ class DocumentParser:
 
             full_text = "\n".join(text_parts).strip()
             if not full_text:
-                return "", 1, "empty", False, None
+                return "", 1, "empty", False, "docx_parser", "TEXT_NOT_AVAILABLE"
 
             quality = "good" if len(full_text) > 50 else "sparse"
-            return full_text, 1, quality, True, None
+            return full_text, 1, quality, True, "docx_parser", None
         except Exception as e:
             logger.error(f"python-docx failed to parse {file_path}: {e}")
-            return "", 0, "corrupted", False, "malformed_docx"
+            return "", 0, "corrupted", False, "docx_parser", "malformed_docx"
 
     @staticmethod
-    def parse_doc(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
+    def parse_doc(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
         """Handles legacy binary .doc format safely."""
-        # Legacy binary .doc parsing environment safety check
-        return "", 0, "unsupported_legacy", False, "unsupported_legacy_format"
+        return "", 0, "unsupported_legacy", False, "doc_parser", "UNSUPPORTED_FORMAT"
 
     @staticmethod
-    def parse_txt(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
+    def parse_txt(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
         """Parses plain text files across multiple encodings."""
         encodings = ["utf-8", "utf-8-sig", "latin-1", "ascii"]
         for enc in encodings:
@@ -263,54 +299,56 @@ class DocumentParser:
                 with open(file_path, "r", encoding=enc) as f:
                     text = f.read().strip()
                 if not text:
-                    return "", 1, "empty", False, None
+                    return "", 1, "empty", False, "txt_reader", "TEXT_NOT_AVAILABLE"
                 quality = "good" if len(text) > 30 else "sparse"
-                return text, 1, quality, True, None
+                return text, 1, quality, True, "txt_reader", None
             except (UnicodeDecodeError, Exception):
                 continue
-        return "", 0, "encoding_error", False, "invalid_txt_encoding"
+        return "", 0, "encoding_error", False, "txt_reader", "invalid_txt_encoding"
 
     @staticmethod
-    def parse_image(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
-        """Inspects JPG, JPEG, PNG image files."""
+    def parse_image(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
+        """Inspects JPG, JPEG, PNG image files via OCR fallback."""
         try:
             with Image.open(file_path) as img:
                 width, height = img.size
                 format_name = img.format
 
             ocr_text = ""
-            # Attempt OCR fallback if pytesseract is available
+            ocr_failed = False
             try:
                 import pytesseract
                 with Image.open(file_path) as img:
                     ocr_text = pytesseract.image_to_string(img).strip()
-            except Exception:
-                # pytesseract not installed or tesseract binary not available
-                ocr_text = f"[IMAGE DOCUMENT: {format_name} {width}x{height}px]"
+            except Exception as e:
+                logger.warning(f"pytesseract failed for image {file_path}: {e}")
+                ocr_failed = True
 
-            text_available = bool(ocr_text and not ocr_text.startswith("[IMAGE DOCUMENT"))
-            quality = "good" if text_available else "image_without_ocr"
-            return ocr_text, 1, quality, text_available, None
+            text_available = bool(ocr_text and len(ocr_text) >= 15)
+            if text_available:
+                quality = "good" if len(ocr_text) > 50 else "sparse"
+                return ocr_text, 1, quality, True, "image_ocr", None
+
+            err_code = "OCR_FAILED" if ocr_failed or not ocr_text else "TEXT_NOT_AVAILABLE"
+            return "", 1, "unusable", False, "image_ocr_failed", err_code
         except Exception as e:
             logger.error(f"Image parser failed for {file_path}: {e}")
-            return "", 0, "corrupted", False, "invalid_image"
+            return "", 0, "corrupted", False, "image_parser", "invalid_image"
 
     @staticmethod
-    def parse_svg(file_path: str) -> Tuple[str, int, str, bool, Optional[str]]:
+    def parse_svg(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
         """Safely parses XML SVG documents stripping scripts and extracting visible text."""
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 raw_xml = f.read()
 
-            # Reject malicious scripts or executable code inside SVG
             if "<script" in raw_xml.lower() or "javascript:" in raw_xml.lower():
                 logger.warning(f"Unsafe content detected in SVG: {file_path}")
-                return "", 0, "unsafe_content", False, "unsafe_svg_script"
+                return "", 0, "unsafe_content", False, "svg_parser", "unsafe_svg_script"
 
             root = ET.fromstring(raw_xml)
             text_nodes = []
             for elem in root.iter():
-                # Extract text content from SVG elements
                 tag = elem.tag.split("}")[-1].lower() if "}" in elem.tag else elem.tag.lower()
                 if tag in ["text", "tspan", "title", "desc", "tref"] and elem.text:
                     stripped = elem.text.strip()
@@ -319,14 +357,14 @@ class DocumentParser:
 
             extracted = "\n".join(text_nodes).strip()
             if not extracted:
-                return f"[SVG VECTOR GRAPHIC: no text nodes]", 1, "svg_no_text", False, None
+                return "", 1, "svg_no_text", False, "svg_parser", "TEXT_NOT_AVAILABLE"
 
-            return extracted, 1, "good", True, None
+            return extracted, 1, "good", True, "svg_parser", None
         except ET.ParseError:
-            return "", 0, "corrupted", False, "invalid_svg"
+            return "", 0, "corrupted", False, "svg_parser", "invalid_svg"
         except Exception as e:
             logger.error(f"SVG parser failed for {file_path}: {e}")
-            return "", 0, "corrupted", False, "invalid_svg"
+            return "", 0, "corrupted", False, "svg_parser", "invalid_svg"
 
 
 def parse_document(file_path: str) -> Tuple[str, int, str, bool, str, Optional[str]]:
@@ -336,25 +374,19 @@ def parse_document(file_path: str) -> Tuple[str, int, str, bool, str, Optional[s
     """
     ext = Path(file_path).suffix.lower()
     if ext == ".pdf":
-        text, pages, quality, available, err = DocumentParser.parse_pdf(file_path)
-        return text, pages, quality, available, "pdf_text", err
+        return DocumentParser.parse_pdf(file_path)
     elif ext == ".docx":
-        text, pages, quality, available, err = DocumentParser.parse_docx(file_path)
-        return text, pages, quality, available, "docx_parser", err
+        return DocumentParser.parse_docx(file_path)
     elif ext == ".doc":
-        text, pages, quality, available, err = DocumentParser.parse_doc(file_path)
-        return text, pages, quality, available, "doc_parser", err
+        return DocumentParser.parse_doc(file_path)
     elif ext == ".txt":
-        text, pages, quality, available, err = DocumentParser.parse_txt(file_path)
-        return text, pages, quality, available, "txt_reader", err
+        return DocumentParser.parse_txt(file_path)
     elif ext in [".jpg", ".jpeg", ".png"]:
-        text, pages, quality, available, err = DocumentParser.parse_image(file_path)
-        return text, pages, quality, available, "image_parser", err
+        return DocumentParser.parse_image(file_path)
     elif ext == ".svg":
-        text, pages, quality, available, err = DocumentParser.parse_svg(file_path)
-        return text, pages, quality, available, "svg_parser", err
+        return DocumentParser.parse_svg(file_path)
     else:
-        return "", 0, "unsupported", False, "unknown_parser", "unsupported_extension"
+        return "", 0, "unsupported", False, "unknown_parser", "UNSUPPORTED_FORMAT"
 
 
 # =============================================================================
@@ -444,25 +476,167 @@ def classify_with_rule_engine(document_text: str, filename: str) -> Dict[str, An
     Used when Ollama is unavailable, times out, or returns unconfident classification.
     CLASSIFIES PURELY BASED ON EXTRACTED DOCUMENT TEXT CONTENT. FILENAME IS IGNORED.
     """
+    if not document_text or len(document_text.strip()) < 10:
+        return {
+            "document_type": "unknown",
+            "confidence": 0.0,
+            "reasoning": "Insufficient or unreadable text content for document classification.",
+            "error_type": "TEXT_NOT_AVAILABLE"
+        }
+
     text_lower = document_text.lower()
 
-    # 1. Existing Core Document Types
+    # =========================================================================
+    # 1. PAN CARD & SPECIFIC IDENTITY OVERRIDES
+    # =========================================================================
+    has_pan_regex = bool(re.search(r'\b[A-Z]{5}[0-9]{4}[A-Z]\b', document_text))
+    has_pan_wording = any(k in text_lower for k in ["permanent account number", "pan card", "income tax department", "govt. of india pan"])
+    is_tax_or_tds = any(k in text_lower for k in ["form no. 16", "form 16", "income tax return", "itr-1", "itr-2", "itr-4"])
+
+    if (has_pan_regex or has_pan_wording) and not is_tax_or_tds:
+        # Check if specifically part of Student or Co-applicant KYC record
+        if "student" in text_lower and any(k in text_lower for k in ["student kyc", "student id", "student name", "admission"]):
+            return {"document_type": "student_kyc", "confidence": 0.95, "reasoning": "Detected Student KYC identity record.", "error_type": None}
+        if any(k in text_lower for k in ["co-applicant", "co applicant", "coapplicant"]) and any(k in text_lower for k in ["kyc", "parent", "spouse", "guarantor"]):
+            return {"document_type": "co_applicant_kyc", "confidence": 0.95, "reasoning": "Detected Co-applicant KYC identity record.", "error_type": None}
+        return {"document_type": "pan_card", "confidence": 0.95, "reasoning": "Detected Permanent Account Number (PAN) card signatures.", "error_type": None}
+
+    # =========================================================================
+    # 2. STUDENT & CO-APPLICANT KYC (EDUCATION LOAN CONTEXT)
+    # =========================================================================
+    if any(k in text_lower for k in ["admission letter", "admission offer", "admission reference", "fee structure", "tuition fee"]):
+        pass  # Evaluate in specific education documents section
+    elif any(k in text_lower for k in [
+        "student kyc", "student identity", "student id", "student-kyc-",
+        "stu-syn-", "student identity proof", "student verification", "education loan - student kyc"
+    ]) or ("student" in text_lower and any(k in text_lower for k in ["identity reference", "date of birth", "dob", "enrollment no", "college id", "university id"])):
+        return {"document_type": "student_kyc", "confidence": 0.95, "reasoning": "Detected Student KYC and student identity credentials.", "error_type": None}
+
+    if any(k in text_lower for k in [
+        "co-applicant kyc", "co applicant kyc", "coapplicant kyc",
+        "co-kyc-", "coapplicant identity", "co-applicant identity",
+        "education loan - co-applicant kyc"
+    ]) or (any(k in text_lower for k in ["co-applicant", "coapplicant", "co applicant"]) and any(k in text_lower for k in ["relationship", "identity reference", "parent", "kyc", "guarantor"]) and not any(k in text_lower for k in ["payslip", "gross salary", "salary certificate", "employment and income"])):
+        return {"document_type": "co_applicant_kyc", "confidence": 0.95, "reasoning": "Detected Co-applicant KYC and relationship details.", "error_type": None}
+
+    # =========================================================================
+    # 3. SPECIFIC GOVERNMENT IDENTITY DOCUMENTS
+    # =========================================================================
+    if any(k in text_lower for k in ["aadhaar", "uidai", "unique identification authority", "mera aadhaar", "aadhar"]) or bool(re.search(r'\b\d{4}\s\d{4}\s\d{4}\b', document_text)):
+        return {"document_type": "aadhaar_identity", "confidence": 0.95, "reasoning": "Detected Aadhaar UIDAI identity signatures.", "error_type": None}
+
+    if any(k in text_lower for k in ["passport", "republic of india passport", "place of issue", "date of expiry", "passport no"]):
+        return {"document_type": "passport_identity", "confidence": 0.95, "reasoning": "Detected Republic of India Passport details.", "error_type": None}
+
+    if any(k in text_lower for k in ["election commission", "voter id", "elector's photo", "electoral photo", "epic no", "epic number", "voter identity"]):
+        return {"document_type": "voter_identity", "confidence": 0.95, "reasoning": "Detected Voter Identity / Election Commission EPIC details.", "error_type": None}
+
+    if any(k in text_lower for k in ["driving licence", "driving license", "motor vehicles act", "licence to drive", "license to drive", "dl no", "transport department"]):
+        return {"document_type": "driving_license", "confidence": 0.95, "reasoning": "Detected Motor Vehicle Driving Licence credentials.", "error_type": None}
+
+    if any(k in text_lower for k in [
+        "government identity", "identity proof", "identity document", "identity number",
+        "identity reference", "sample identity proof", "photo identity", "date of birth",
+        "dob:", "dob ", "father's name", "permanent address", "issuing authority", "kyc document"
+    ]):
+        return {"document_type": "kyc_identity", "confidence": 0.95, "reasoning": "Detected government identity document signatures.", "error_type": None}
+
+    # =========================================================================
+    # 4. PROPERTY DOCUMENTS (STRICT DISTINCTION)
+    # =========================================================================
+    # 4a. Property Tax Receipt (check before Title to prevent confusion)
+    if any(k in text_lower for k in ["property tax", "municipal tax receipt", "tax receipt number", "assessment tax", "tax paid receipt", "municipal corporation tax", "tax assessment"]):
+        return {"document_type": "property_tax_receipt", "confidence": 0.95, "reasoning": "Detected municipal property tax receipt and assessment details.", "error_type": None}
+
+    # 4b. Property Valuation Report (check before Title to prevent confusion)
+    if any(k in text_lower for k in [
+        "property valuation", "real estate valuation", "plot valuation", "building valuation",
+        "forced sale value", "fair market value", "assessed value", "valuer report", "property inspection report"
+    ]) or ("valuation" in text_lower and any(k in text_lower for k in ["engineer", "valuer", "market value", "inspection"])):
+        return {"document_type": "property_valuation_report", "confidence": 0.95, "reasoning": "Detected certified property valuation assessment report.", "error_type": None}
+
+    # 4c. Sale Deed & Conveyance Deed
+    if any(k in text_lower for k in ["sale deed", "conveyance deed", "deed of sale", "sale consideration", "registered sale deed"]) or (all(k in text_lower for k in ["vendor", "purchaser"]) and "deed" in text_lower):
+        return {"document_type": "sale_deed", "confidence": 0.95, "reasoning": "Detected property sale deed ownership conveyance deed.", "error_type": None}
+
+    # 4d. Property Registration Document
+    if any(k in text_lower for k in ["property registration", "sub-registrar", "registered property", "registration certificate under", "registration number of deed"]):
+        return {"document_type": "property_registration_document", "confidence": 0.95, "reasoning": "Detected official property sub-registrar registration record.", "error_type": None}
+
+    # 4e. Sale Agreement / Builder Buyer Agreement
+    if any(k in text_lower for k in ["sale agreement", "agreement for sale", "agreement to sell", "property purchase agreement", "builder buyer agreement"]):
+        return {"document_type": "sale_agreement", "confidence": 0.95, "reasoning": "Detected agreement to sell / sale agreement for property transaction.", "error_type": None}
+
+    # 4f. Approved Building Plan
+    if any(k in text_lower for k in ["building plan", "approved plan", "sanctioned plan", "municipal approval", "approval number", "approving authority"]):
+        return {"document_type": "approved_building_plan", "confidence": 0.90, "reasoning": "Detected approved building plan and municipal sanction details.", "error_type": None}
+
+    # 4g. Land Ownership Document (Agricultural / Rural)
+    if any(k in text_lower for k in [
+        "document type: land records", "land record reference", "land records", "patta",
+        "chitta", "7/12", "7/12 extract", "record of rights", "ror", "khasra", "khatoni",
+        "land ownership record", "land ownership certificate", "land record"
+    ]) and not any(k in text_lower for k in ["cultivation information", "kharif", "rabi", "zaid"]):
+        return {"document_type": "land_ownership_document", "confidence": 0.95, "reasoning": "Detected agricultural land ownership record (Patta/Chitta/7-12/RoR/Land Records).", "error_type": None}
+
+    # 4h. Cultivation / Crop Record
+    if any(k in text_lower for k in [
+        "cultivation record", "cultivation information", "cultivated area", "cultivation status",
+        "crop record", "crop cultivation", "crop season", "kharif", "rabi", "zaid",
+        "sowing date", "harvest date", "expected yield", "farming activity"
+    ]):
+        return {"document_type": "cultivation_record", "confidence": 0.95, "reasoning": "Detected agricultural crop cultivation record or cultivation information.", "error_type": None}
+
+    # 4i. Property Title Document
+    if any(k in text_lower for k in [
+        "property and title", "property or title", "property title", "title deed",
+        "ownership deed", "title reference", "sample-title-", "title status",
+        "property owner", "property schedule", "survey reference", "declared owner",
+        "ownership status", "property and title documents", "property or title documents"
+    ]) or ("property" in text_lower and any(k in text_lower for k in ["title", "owner", "boundaries", "schedule of property"])):
+        return {"document_type": "property_title_document", "confidence": 0.95, "reasoning": "Detected property title and registered ownership details.", "error_type": None}
+
+    # =========================================================================
+    # 5. AGRICULTURAL DOCUMENTS (STRICT AGRICULTURAL WORDING REQUIRED)
+    # =========================================================================
+    has_agri_context = any(k in text_lower for k in [
+        "agricultural", "agriculture", "farmer", "crop", "cultivation", "harvest", "farm"
+    ])
+
+    if has_agri_context and any(k in text_lower for k in [
+        "agricultural income", "agriculture income", "farm income", "crop income",
+        "cultivation income", "earnings from agriculture", "agricultural earnings",
+        "income from cultivation", "farmer income", "agricultural income proof",
+        "agricultural income certificate", "agricultural income statement"
+    ]):
+        return {"document_type": "agricultural_income_proof", "confidence": 0.95, "reasoning": "Detected verified agricultural income proof and crop earnings.", "error_type": None}
+
+    # =========================================================================
+    # 6. SALARY & EMPLOYMENT INCOME PROOF
+    # =========================================================================
+    # Co-applicant income proof
+    if any(k in text_lower for k in ["co-applicant", "coapplicant", "co applicant", "co-app"]) and any(k in text_lower for k in ["income", "salary", "payslip", "gross salary", "net pay"]):
+        return {"document_type": "co_applicant_income_proof", "confidence": 0.95, "reasoning": "Detected co-applicant income proof details.", "error_type": None}
+
+    # Employer salary certificate / employment income proof
+    if any(k in text_lower for k in [
+        "salary certificate", "employment and income", "employment income proof",
+        "employer or source", "employment since", "annual income", "income eligibility",
+        "gross salary", "monthly gross income"
+    ]) or ("income proof" in text_lower and any(k in text_lower for k in ["employer", "occupation", "software engineer", "employee", "salary", "employment"])):
+        return {"document_type": "salary_certificate", "confidence": 0.95, "reasoning": "Detected employer salary certificate and employment income proof.", "error_type": None}
+
     if any(k in text_lower for k in ["payslip", "salary slip", "monthly payslip", "gross salary", "net payable salary", "net pay", "basic salary", "pay period"]):
         return {"document_type": "payslip", "confidence": 0.95, "reasoning": "Detected payslip earnings header and payroll structure.", "error_type": None}
 
-    if any(k in text_lower for k in ["account statement", "bank statement", "opening balance", "closing balance", "debit", "credit", "ledger balance", "available balance"]) or ("bank" in text_lower and ("account" in text_lower or "balance" in text_lower)):
-        return {"document_type": "bank_statement", "confidence": 0.95, "reasoning": "Detected bank account statement headers and transaction ledger.", "error_type": None}
-
-    if any(k in text_lower for k in ["income tax return", "itr-1", "assessment year", "taxable income", "tax payable", "form 1040", "gross total income"]):
+    if any(k in text_lower for k in ["income tax return", "itr-1", "itr-2", "itr-4", "assessment year", "taxable income", "tax payable", "form 1040", "gross total income"]):
         return {"document_type": "itr_tax_return", "confidence": 0.95, "reasoning": "Detected Income Tax Return (ITR) headers and tax computation keywords.", "error_type": None}
 
-    # PAN Card specific check (Priority over generic kyc_identity, provided it's not Form 16 / ITR)
-    if not any(k in text_lower for k in ["form no. 16", "form 16", "income tax return", "itr-1"]):
-        if any(k in text_lower for k in ["permanent account number", "pan card", "income tax department"]) or bool(re.search(r'\b[A-Z]{5}\d{4}[A-Z]{1}\b', document_text)):
-            return {"document_type": "pan_card", "confidence": 0.95, "reasoning": "Detected Permanent Account Number (PAN) identity document signatures.", "error_type": None}
+    if any(k in text_lower for k in ["form no. 16", "form 16", "section 203", "tax deducted at source", "certificate under section 203"]):
+        return {"document_type": "form_16", "confidence": 0.95, "reasoning": "Detected Form 16 TDS certificate signatures.", "error_type": None}
 
-    if any(k in text_lower for k in ["aadhaar", "passport", "voter id", "driver license", "driving licence", "dob:", "identity proof", "identity document", "identity number", "government identity", "sample identity proof"]):
-        return {"document_type": "kyc_identity", "confidence": 0.95, "reasoning": "Detected government identity document signatures.", "error_type": None}
+    if any(k in text_lower for k in ["account statement", "bank statement", "opening balance", "closing balance", "debit", "credit", "ledger balance", "available balance", "bank details", "account number"]) or ("bank" in text_lower and ("account" in text_lower or "balance" in text_lower or "transactions" in text_lower)):
+        return {"document_type": "bank_statement", "confidence": 0.95, "reasoning": "Detected bank account statement headers and transaction ledger.", "error_type": None}
 
     if any(k in text_lower for k in ["office id", "company id", "employee id", "staff id", "employee card", "staff card", "employee identity card", "company identity card", "corporate id"]):
         return {"document_type": "office_id", "confidence": 0.95, "reasoning": "Detected employee office identity card signatures.", "error_type": None}
@@ -473,40 +647,18 @@ def classify_with_rule_engine(document_text: str, filename: str) -> Dict[str, An
     if any(k in text_lower for k in ["offer of employment", "appointment letter", "employment letter", "confirmation of employment", "employment confirmation", "joining date", "date of joining", "certificate of service", "employment proof", "letter of employment", "currently employed", "employed with"]):
         return {"document_type": "employment_letter", "confidence": 0.90, "reasoning": "Detected employment offer, confirmation, or service certificate headers.", "error_type": None}
 
-    if any(k in text_lower for k in ["form no. 16", "form 16", "section 203", "tax deducted at source", "certificate under section 203"]):
-        return {"document_type": "form_16", "confidence": 0.95, "reasoning": "Detected Form 16 TDS certificate signatures.", "error_type": None}
-
     if any(k in text_lower for k in ["electricity bill", "utility bill", "water bill", "lease agreement", "tenancy agreement", "broadband bill", "gas service", "service address"]):
         return {"document_type": "address_proof", "confidence": 0.90, "reasoning": "Detected utility bill or tenancy address proof document signatures.", "error_type": None}
 
-    # 2. Gold Documents (Check before general valuation reports)
-    if any(k in text_lower for k in ["gold valuation", "jewellery valuation", "ornament valuation", "gold weight", "carat", "purity", "appraiser report", "pledge receipt"]) or ("gold" in text_lower and "valuation" in text_lower):
-        return {"document_type": "gold_security_document", "confidence": 0.90, "reasoning": "Detected gold jewellery valuation and security pledge record.", "error_type": None}
-
-    # 3. Property Documents
-    if any(k in text_lower for k in ["title deed", "sale deed", "property title", "ownership deed", "conveyance deed"]):
-        return {"document_type": "sale_deed", "confidence": 0.95, "reasoning": "Detected property sale deed ownership signatures.", "error_type": None}
-
-    if any(k in text_lower for k in ["sale agreement", "agreement for sale", "agreement to sell", "property purchase agreement"]):
-        return {"document_type": "sale_agreement", "confidence": 0.95, "reasoning": "Detected sale agreement for property transaction.", "error_type": None}
-
-    if any(k in text_lower for k in ["building plan", "approved plan", "sanctioned plan", "municipal approval", "approval number", "approving authority"]):
-        return {"document_type": "approved_building_plan", "confidence": 0.90, "reasoning": "Detected approved building plan and municipal sanction details.", "error_type": None}
-
-    if any(k in text_lower for k in ["property tax", "municipal tax receipt", "tax receipt number", "property id", "assessment tax"]):
-        return {"document_type": "property_tax_receipt", "confidence": 0.95, "reasoning": "Detected property tax receipt and assessment details.", "error_type": None}
-
-    if any(k in text_lower for k in ["property valuation", "real estate valuation", "plot valuation", "building valuation", "forced sale value"]) or ("property" in text_lower and "valuation" in text_lower):
-        return {"document_type": "property_valuation_report", "confidence": 0.90, "reasoning": "Detected property valuation assessment report.", "error_type": None}
-
-    # 4. Vehicle Documents
+    # =========================================================================
+    # 7. VEHICLE, EDUCATION, BUSINESS, GOLD, FD, CONSUMER DURABLE
+    # =========================================================================
     if any(k in text_lower for k in ["vehicle quotation", "car quotation", "proforma invoice", "auto quotation", "ex-showroom price", "on-road price"]):
         return {"document_type": "vehicle_quotation", "confidence": 0.95, "reasoning": "Detected vehicle dealer price quotation details.", "error_type": None}
 
     if any(k in text_lower for k in ["vehicle invoice", "vehicle tax invoice", "car invoice", "chassis number", "chassis no", "engine number", "engine no", "dealer invoice", "auto invoice"]):
         return {"document_type": "vehicle_invoice", "confidence": 0.95, "reasoning": "Detected vehicle purchase invoice and registration metadata.", "error_type": None}
 
-    # 5. Education Documents
     if any(k in text_lower for k in ["admission letter", "admission offer letter", "admission offer", "provisional admission", "offer of admission", "acceptance letter", "course admission"]):
         return {"document_type": "admission_letter", "confidence": 0.95, "reasoning": "Detected educational institution admission letter.", "error_type": None}
 
@@ -516,8 +668,7 @@ def classify_with_rule_engine(document_text: str, filename: str) -> Dict[str, An
     if any(k in text_lower for k in ["marksheet", "grade card", "academic transcript", "statement of marks", "academic certificate", "roll number"]):
         return {"document_type": "academic_certificate", "confidence": 0.90, "reasoning": "Detected academic certificate or transcript marksheet.", "error_type": None}
 
-    # 5. Business Documents
-    if any(k in text_lower for k in ["gstin", "gst certificate", "registration certificate under gst", "form gst reg-06"]):
+    if any(k in text_lower for k in ["gstin", "gst certificate", "gst reference", "gst registration", "registration certificate under gst", "form gst reg-06", "document type: gst"]) or bool(re.search(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b', document_text)):
         return {"document_type": "gst_certificate", "confidence": 0.95, "reasoning": "Detected GST registration certificate signatures.", "error_type": None}
 
     if any(k in text_lower for k in ["gstr-3b", "gstr-1", "gst return", "taxable turnover", "tax liability"]):
@@ -532,95 +683,32 @@ def classify_with_rule_engine(document_text: str, filename: str) -> Dict[str, An
     if any(k in text_lower for k in ["certificate of incorporation", "business registration", "shop and establishment", "partnership deed", "udyam registration"]):
         return {"document_type": "business_registration", "confidence": 0.90, "reasoning": "Detected business registration or incorporation certificate.", "error_type": None}
 
-    # 6. Gold Documents
-    if any(k in text_lower for k in ["gold valuation", "jewellery valuation", "ornament valuation", "gold weight", "carat", "purity", "appraiser report", "pledge receipt"]):
+    if any(k in text_lower for k in ["gold valuation", "jewellery valuation", "ornament valuation", "gold weight", "carat", "purity", "appraiser report", "pledge receipt"]) or ("gold" in text_lower and "valuation" in text_lower):
         return {"document_type": "gold_security_document", "confidence": 0.90, "reasoning": "Detected gold jewellery valuation and security pledge record.", "error_type": None}
 
-    # 7. Agriculture Documents — 3-Way Weighted Purpose Evidence Engine
-    agri_income_very_high_signatures = [
-        "agricultural income proof", "agricultural income certificate", "agricultural income statement",
-        "agricultural income", "annual agricultural income", "net agricultural income", "gross agricultural income",
-        "agricultural expenses", "cultivation expenses", "financial year", "income for fy", "income certificate",
-        "income assessment", "income verification", "net income from agriculture", "gross income from agriculture"
-    ]
-    agri_income_high_signatures = [
-        "crop income", "agricultural earnings", "annual income", "gross income", "income period", "income details"
-    ]
-
-    cultivation_very_high_signatures = [
-        "cultivation record", "crop cultivation record", "crop record", "official cultivation",
-        "crop season", "sowing date", "harvest date", "expected harvest", "expected yield",
-        "cultivation method", "crop pattern", "cultivation status", "crop production"
-    ]
-    cultivation_high_signatures = [
-        "primary crop", "kharif", "rabi", "zaid", "irrigated", "rainfed", "cultivator", "yield"
-    ]
-
-    land_very_high_signatures = [
-        "land ownership record", "land ownership certificate", "land record", "patta",
-        "chitta", "7/12", "7/12 extract", "record of rights", "ror", "title holder",
-        "registered owner", "ownership type", "possession certificate"
-    ]
-    land_high_signatures = [
-        "land owner", "revenue record", "land parcel", "ownership details", "land registration", "khatoni", "khasra"
-    ]
-
-    # Calculate evidence scores
-    income_score = sum(20 for sig in agri_income_very_high_signatures if sig in text_lower) + \
-                   sum(10 for sig in agri_income_high_signatures if sig in text_lower)
-
-    cult_score = sum(20 for sig in cultivation_very_high_signatures if sig in text_lower) + \
-                 sum(10 for sig in cultivation_high_signatures if sig in text_lower)
-
-    land_score = sum(20 for sig in land_very_high_signatures if sig in text_lower) + \
-                 sum(10 for sig in land_high_signatures if sig in text_lower)
-
-    # Header boost (first 300 chars)
-    header_text = text_lower[:300]
-    if any(sig in header_text for sig in ["agricultural income", "income proof", "income certificate", "income statement"]):
-        income_score += 30
-    if any(sig in header_text for sig in ["cultivation record", "crop record", "crop cultivation", "cultivation / crop"]):
-        cult_score += 30
-    if any(sig in header_text for sig in ["land ownership", "land record", "patta", "7/12"]):
-        land_score += 30
-
-    # Decision based on dominant document purpose evidence
-    if income_score > 0 and income_score >= cult_score and income_score >= land_score:
-        return {
-            "document_type": "agricultural_income_proof",
-            "confidence": 0.95,
-            "reasoning": f"Detected strong agricultural income proof signatures (financial year, gross/net agricultural income, expenses) with income score {income_score}.",
-            "error_type": None
-        }
-
-    if cult_score > 0 and cult_score >= land_score:
-        return {
-            "document_type": "cultivation_record",
-            "confidence": 0.95,
-            "reasoning": f"Detected strong crop cultivation signatures (crop season, sowing/harvest dates, yield, cultivation method) with cultivation score {cult_score}.",
-            "error_type": None
-        }
-
-    if land_score > 0:
-        return {
-            "document_type": "land_record",
-            "confidence": 0.95,
-            "reasoning": f"Detected land ownership signatures (Patta/Chitta/7/12/Owner) with land ownership score {land_score}.",
-            "error_type": None
-        }
-
-    # 8. Fixed Deposit Documents
     if any(k in text_lower for k in ["fixed deposit", "term deposit receipt", "fd receipt", "fd number", "maturity amount", "maturity date", "deposit amount"]):
         return {"document_type": "fixed_deposit_certificate", "confidence": 0.95, "reasoning": "Detected Fixed Deposit (FD) certificate or term deposit receipt.", "error_type": None}
 
-    # 9. Consumer Durable Documents
+    if any(k in text_lower for k in [
+        "product quotation", "quotation reference", "quoted product price",
+        "consumer durable quotation", "consumer durable - product quotation",
+        "consumer durable loan - product quotation"
+    ]):
+        return {"document_type": "product_quotation", "confidence": 0.95, "reasoning": "Detected consumer durable product price quotation details.", "error_type": None}
+
     if any(k in text_lower for k in ["consumer durable", "product invoice", "appliance invoice", "electronics invoice", "serial number", "unit price"]):
-        return {"document_type": "product_invoice", "confidence": 0.90, "reasoning": "Detected product purchase invoice for consumer durable item.", "error_type": None}
+        return {"document_type": "product_invoice", "confidence": 0.95, "reasoning": "Detected product purchase invoice for consumer durable item.", "error_type": None}
 
-    if len(text_lower.strip()) > 30:
-        return {"document_type": "other", "confidence": 0.70, "reasoning": "Readable general document content.", "error_type": None}
 
-    return {"document_type": "unknown", "confidence": 0.0, "reasoning": "Insufficient text content for document classification.", "error_type": "insufficient_text"}
+    # =========================================================================
+    # 8. FALLBACK & ERROR REPORTING (NO SILENT OTHER CONVERSION)
+    # =========================================================================
+    return {
+        "document_type": "unknown",
+        "confidence": 0.0,
+        "reasoning": "Document content could not be classified with sufficient confidence.",
+        "error_type": "LOW_CONFIDENCE"
+    }
 
 
 def classify_with_ollama(document_text: str, filename: str) -> Dict[str, Any]:
@@ -722,11 +810,16 @@ def node_parse_document(state: LoanDocumentState) -> LoanDocumentState:
     file_path = current_doc.get("file_path", "")
     text, pages, quality, available, method, parse_err = parse_document(file_path)
 
+    ocr_used = "ocr" in method
+    ocr_success = (ocr_used and not method.endswith("_failed") and available and len((text or "").strip()) > 0) if ocr_used else False
+
     current_doc["extracted_text"] = text
     current_doc["page_count"] = pages
     current_doc["content_quality"] = quality
     current_doc["text_available"] = available
     current_doc["extraction_method"] = method
+    current_doc["ocr_used"] = ocr_used
+    current_doc["ocr_success"] = ocr_success
     if parse_err:
         current_doc["error_type"] = parse_err
 
@@ -744,10 +837,13 @@ def node_check_document_quality(state: LoanDocumentState) -> LoanDocumentState:
     text = current_doc.get("extracted_text", "")
     available = current_doc.get("text_available", False)
 
-    if not available or not text.strip():
+    if not available or not (text and text.strip()):
         current_doc["can_classify"] = False
-        if not current_doc.get("error_type"):
-            current_doc["error_type"] = "no_extractable_text"
+        method = current_doc.get("extraction_method", "")
+        if "ocr_failed" in method:
+            current_doc["error_type"] = "OCR_FAILED"
+        else:
+            current_doc["error_type"] = "TEXT_NOT_AVAILABLE"
     else:
         current_doc["can_classify"] = True
 
@@ -790,27 +886,33 @@ def node_validate_classification(state: LoanDocumentState) -> LoanDocumentState:
     current_doc = state.get("current_document", {})
     res = current_doc.get("classification_result", {})
 
-    doc_type = res.get("document_type", "unknown")
+    raw_doc_type = res.get("document_type", "unknown")
     conf = res.get("confidence", 0.0)
     reasoning = res.get("reasoning", "")
     err_type = res.get("error_type") or current_doc.get("error_type")
 
+    # Contextual normalization if requirement_id or loan_type is in current_doc
+    req_id = current_doc.get("requirement_id")
+    loan_type = current_doc.get("loan_type")
+    norm_doc_type = normalize_document_type(raw_doc_type, req_id, loan_type)
+
     # Enforce CLASSIFICATION_CONFIDENCE_THRESHOLD
-    if conf < CONFIDENCE_THRESHOLD and doc_type != "unknown":
+    if conf < CONFIDENCE_THRESHOLD and raw_doc_type != "unknown":
         logger.warning(
-            f"Low confidence ({conf:.2f} < {CONFIDENCE_THRESHOLD}) for {current_doc.get('filename')}. Overriding category '{doc_type}' to 'unknown'."
+            f"Low confidence ({conf:.2f} < {CONFIDENCE_THRESHOLD}) for {current_doc.get('filename')}. Overriding category '{raw_doc_type}' to 'unknown'."
         )
-        reasoning = f"[LOW CONFIDENCE OVERRIDE: {conf:.2f} < threshold {CONFIDENCE_THRESHOLD}] Original prediction: {doc_type}. {reasoning}"
-        doc_type = "unknown"
+        reasoning = f"[LOW CONFIDENCE OVERRIDE: {conf:.2f} < threshold {CONFIDENCE_THRESHOLD}] Original prediction: {raw_doc_type}. {reasoning}"
+        raw_doc_type = "unknown"
+        norm_doc_type = "unknown"
         status = "unknown"
-    elif err_type or doc_type == "unknown":
-        status = "failed" if err_type in ["missing_file", "file_too_large", "corrupted_pdf", "signature_mismatch", "ollama_unavailable"] else "unknown"
+    elif err_type or raw_doc_type == "unknown":
+        status = "failed" if err_type in ["missing_file", "file_too_large", "corrupted_pdf", "signature_mismatch", "ollama_unavailable", "OCR_FAILED", "TEXT_NOT_AVAILABLE"] else "unknown"
     else:
         status = "success"
 
     # Print Agent 1 Classification Debug Panel
     logger.info(
-        f"[AGENT 1 DEBUG PANEL] File: {current_doc.get('filename')} | Type: {doc_type} | Conf: {conf:.2f} | Method: {current_doc.get('extraction_method')} | Text: {len(current_doc.get('extracted_text', ''))} chars"
+        f"[AGENT 1 DEBUG PANEL] File: {current_doc.get('filename')} | Type: {raw_doc_type} (Norm: {norm_doc_type}) | Conf: {conf:.2f} | Method: {current_doc.get('extraction_method')} | OCR used: {current_doc.get('ocr_used')} | OCR success: {current_doc.get('ocr_success')} | Text: {len(current_doc.get('extracted_text', ''))} chars"
     )
     print("\n" + "=" * 60)
     print("[AGENT 1 DEBUG PANEL] Document Classification")
@@ -820,7 +922,10 @@ def node_validate_classification(state: LoanDocumentState) -> LoanDocumentState:
     print(f"Page Count            : {current_doc.get('page_count', 1)}")
     print(f"Extracted Text Length : {len(current_doc.get('extracted_text', ''))} chars")
     print(f"Extraction Method     : {current_doc.get('extraction_method', 'none')}")
-    print(f"Classification Result : {doc_type}")
+    print(f"OCR Used              : {current_doc.get('ocr_used', False)}")
+    print(f"OCR Success           : {current_doc.get('ocr_success', False)}")
+    print(f"Classification Result : {raw_doc_type}")
+    print(f"Normalized Doc Type   : {norm_doc_type}")
     print(f"Confidence Score      : {conf:.2f}")
     print(f"Reasoning             : {reasoning}")
     print("=" * 60 + "\n")
@@ -832,13 +937,16 @@ def node_validate_classification(state: LoanDocumentState) -> LoanDocumentState:
             filename=sanitize_filename(current_doc.get("filename", "unknown")),
             file_extension=Path(current_doc.get("file_path", "")).suffix.lower(),
             file_path=current_doc.get("file_path"),
-            document_type=doc_type,
+            document_type=raw_doc_type,
+            normalized_document_type=norm_doc_type,
             confidence=conf,
             classification_reason=reasoning,
             text_available=current_doc.get("text_available", False),
             text_length=len(current_doc.get("extracted_text", "")),
             page_count=current_doc.get("page_count", 1),
             extraction_method=current_doc.get("extraction_method", "none"),
+            ocr_used=current_doc.get("ocr_used", False),
+            ocr_success=current_doc.get("ocr_success", False),
             content_quality=current_doc.get("content_quality", "unknown"),
             processing_time_ms=current_doc.get("processing_time_ms", 0.0),
             status=status,
@@ -853,12 +961,15 @@ def node_validate_classification(state: LoanDocumentState) -> LoanDocumentState:
             filename=sanitize_filename(current_doc.get("filename", "unknown")),
             file_extension=".unknown",
             document_type="unknown",
+            normalized_document_type="unknown",
             confidence=0.0,
             classification_reason=f"Pydantic schema validation failure: {str(ve)}",
             text_available=False,
             text_length=0,
             page_count=0,
             extraction_method="none",
+            ocr_used=False,
+            ocr_success=False,
             content_quality="corrupted",
             processing_time_ms=current_doc.get("processing_time_ms", 0.0),
             status="failed",

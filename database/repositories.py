@@ -162,9 +162,12 @@ def create_document(
     upload_status: str = "accepted",
     extraction_method: Optional[str] = None,
     ocr_used: bool = False,
+    ocr_success: bool = False,
+    extraction_error: Optional[str] = None,
+    is_active: bool = True,
     text_quality: Optional[str] = None
 ) -> DocumentModel:
-    """Creates a document metadata record in SQLite."""
+    """Creates a document metadata record in SQLite, deactivating previous active records in the slot."""
     # Ensure application exists
     app = get_application(db, application_id)
     if not app:
@@ -175,6 +178,17 @@ def create_document(
         applicants = get_applicants(db, application_id)
         if applicants:
             applicant_id = applicants[0].id
+
+    # Enforce single active document per (application_id, requirement_id)
+    if requirement_id and is_active:
+        prev_docs = db.query(DocumentModel).filter(
+            DocumentModel.application_id == application_id,
+            DocumentModel.requirement_id == requirement_id,
+            DocumentModel.is_active == True
+        ).all()
+        for prev in prev_docs:
+            prev.is_active = False
+            prev.updated_at = datetime.utcnow()
 
     doc = DocumentModel(
         application_id=application_id,
@@ -188,6 +202,9 @@ def create_document(
         upload_status=upload_status,
         extraction_method=extraction_method,
         ocr_used=ocr_used,
+        ocr_success=ocr_success,
+        extraction_error=extraction_error,
+        is_active=is_active,
         text_quality=text_quality,
         uploaded_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
@@ -198,9 +215,12 @@ def create_document(
     return doc
 
 
-def get_documents(db: Session, application_id: str) -> List[DocumentModel]:
-    """Retrieves all documents associated with an application_id."""
-    return db.query(DocumentModel).filter(DocumentModel.application_id == application_id).all()
+def get_documents(db: Session, application_id: str, active_only: bool = True) -> List[DocumentModel]:
+    """Retrieves all documents associated with an application_id. Defaults to active only."""
+    query = db.query(DocumentModel).filter(DocumentModel.application_id == application_id)
+    if active_only:
+        query = query.filter(DocumentModel.is_active == True)
+    return query.all()
 
 
 def get_document_by_id(db: Session, document_id: int) -> Optional[DocumentModel]:

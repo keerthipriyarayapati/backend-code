@@ -48,8 +48,11 @@ from shared.policy import (
     ApplicationDocumentStatus,
     LOAN_DOCUMENT_POLICY,
     LOAN_TYPE_NAMES,
+    CANONICAL_LABELS,
     get_loan_type_policy,
-    is_document_acceptable_for_requirement
+    get_display_document_type,
+    is_document_acceptable_for_requirement,
+    normalize_document_type
 )
 from shared.state import LOAN_TYPE_EXPECTED_DOCUMENTS
 
@@ -201,7 +204,7 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
     loan_type = app_rec.loan_type if app_rec else "personal_loan"
     policy = get_loan_type_policy(loan_type)
 
-    db_docs = repos.get_documents(db, application_id)
+    db_docs = repos.get_documents(db, application_id, active_only=True)
     doc_map: Dict[str, DocumentModel] = {d.requirement_id: d for d in db_docs if d.requirement_id}
 
     all_reqs = policy.get("required", []) + policy.get("optional", [])
@@ -211,18 +214,25 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
         d = doc_map.get(req.requirement_id)
         if d:
             status_val = d.upload_status
-            if status_val == "accepted" and d.document_type:
-                if not is_document_acceptable_for_requirement(d.document_type, req):
+            norm_type = normalize_document_type(d.document_type, req.requirement_id, loan_type)
+            if status_val == "accepted" and norm_type:
+                if not is_document_acceptable_for_requirement(norm_type, req):
                     status_val = "wrong_document"
+            elif status_val != "accepted":
+                status_val = "wrong_document"
             
             err_msg = None
             if status_val == "wrong_document":
-                det_label = (d.document_type or "unknown").replace('_', ' ').title()
+                det_label = (norm_type or "unknown").replace('_', ' ').title()
                 accepted_human = [a.replace('_', ' ').title() for a in req.accepted_document_types]
                 expected_str = " / ".join(accepted_human[:3])
                 err_msg = f"✕ WRONG DOCUMENT — Incorrect Document — Expected: {expected_str}, Detected: {det_label}."
             elif status_val == "duplicate":
                 err_msg = f"Duplicate document detected: '{d.file_name}' already uploaded."
+
+            is_valid = (status_val == "accepted")
+            slot_status_val = "accepted" if is_valid else ("rejected" if status_val == "wrong_document" else status_val)
+            is_wrong = (status_val == "wrong_document")
 
             slot = DocumentSlotStatus(
                 requirement_id=req.requirement_id,
@@ -233,7 +243,12 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
                 uploaded_document_id=str(d.id),
                 uploaded_filename=d.file_name,
                 file_path=d.file_path,
-                detected_document_type=d.document_type,
+                detected_document_type=norm_type,
+                canonical_document_type=norm_type,
+                display_document_type=get_display_document_type(norm_type),
+                is_valid_for_slot=is_valid,
+                slot_status=slot_status_val,
+                wrong_document=is_wrong,
                 confidence=d.classifications[0].confidence if d.classifications else 1.0,
                 error=err_msg
             )
@@ -243,7 +258,12 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
                 display_name=req.display_name,
                 required=req.required,
                 accepted_document_types=req.accepted_document_types,
-                status="pending"
+                status="pending",
+                canonical_document_type=None,
+                display_document_type=None,
+                is_valid_for_slot=False,
+                slot_status="pending",
+                wrong_document=False
             )
         slots_list.append(slot)
 
@@ -251,9 +271,10 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
     opt_slots = [s for s in slots_list if not s.required]
 
     req_count = len(req_slots)
-    uploaded_req = sum(1 for s in req_slots if s.status == "accepted")
-    wrong_req = sum(1 for s in slots_list if s.status == "wrong_document")
-    missing_req = req_count - uploaded_req
+    valid_req = sum(1 for s in req_slots if s.status == "accepted")
+    missing_req = sum(1 for s in req_slots if s.status == "pending")
+    # Invariant: required_total = valid_required + wrong_required + missing_required
+    wrong_req = sum(1 for s in req_slots if s.status not in ["accepted", "pending"])
 
     opt_count = len(opt_slots)
     uploaded_opt = sum(1 for s in opt_slots if s.status == "accepted")
@@ -274,7 +295,7 @@ def _build_application_status_db(application_id: str, db: Session) -> Applicatio
         loan_type=loan_type,
         application_status=app_status,
         required_documents_count=req_count,
-        uploaded_required_documents_count=uploaded_req,
+        uploaded_required_documents_count=valid_req,
         missing_required_documents_count=missing_req,
         wrong_documents_count=wrong_req,
         optional_documents_count=opt_count,
@@ -298,16 +319,20 @@ async def get_loan_types():
 async def get_document_requirements_api(loan_type: str, db: Session = Depends(get_db)):
     """Returns the central document requirement policy for a specified loan type from SQLite DB."""
     db_reqs = repos.get_document_requirements(db, loan_type)
+    policy = get_loan_type_policy(loan_type)
+    policy_req_map = {r.requirement_id: r for r in policy.get("required", []) + policy.get("optional", [])}
     req_list = []
     opt_list = []
 
     for r in db_reqs:
+        pol_req = policy_req_map.get(r.document_type)
+        accepted_types = pol_req.accepted_document_types if pol_req else [r.document_type]
         item = {
             "requirement_id": r.document_type,
-            "display_name": r.display_name,
-            "accepted_document_types": [r.document_type],
+            "display_name": pol_req.display_name if pol_req else r.display_name,
+            "accepted_document_types": accepted_types,
             "required": r.requirement_status == "REQUIRED",
-            "description": r.description,
+            "description": r.description or (pol_req.description if pol_req else None),
             "entity_role": r.applicant_role
         }
         if r.requirement_status == "REQUIRED":
@@ -317,7 +342,6 @@ async def get_document_requirements_api(loan_type: str, db: Session = Depends(ge
 
     # Fallback to policy definitions if database table empty
     if not req_list and not opt_list:
-        policy = get_loan_type_policy(loan_type)
         req_list = [r.model_dump() for r in policy.get("required", [])]
         opt_list = [r.model_dump() for r in policy.get("optional", [])]
 
@@ -569,29 +593,57 @@ async def upload_slot_document(
     # Agent 1 Classification
     class_results = agent_1.process_batch([str(target_path)], doc_ids=[str(doc_rec.id)])
     class_res = class_results[0]
-    detected_type = class_res.get("document_type", "unknown")
+    raw_type = class_res.get("document_type", "unknown")
+    norm_type = class_res.get("normalized_document_type") or normalize_document_type(raw_type, requirement_id, loan_type)
     conf = class_res.get("confidence", 0.0)
+    method = class_res.get("extraction_method", "none")
+    ocr_used = class_res.get("ocr_used", False)
+    ocr_success = class_res.get("ocr_success", False)
+    err_type = class_res.get("error_type")
+    page_count = class_res.get("page_count", 1)
+    text_length = class_res.get("text_length", 0)
+
+    # Semantic upload validation
+    is_acceptable = is_document_acceptable_for_requirement(norm_type, req_def)
+    upload_status = "accepted" if is_acceptable else "wrong_document"
+
+    # Update SQLite document record
+    doc_rec.document_type = norm_type
+    doc_rec.upload_status = upload_status
+    doc_rec.extraction_method = method
+    doc_rec.ocr_used = ocr_used
+    doc_rec.ocr_success = ocr_success
+    doc_rec.extraction_error = err_type
+    db.commit()
 
     # Save Agent 1 output to SQLite
     repos.save_classification(
         db,
         document_id=doc_rec.id,
-        predicted_document_type=detected_type,
+        predicted_document_type=norm_type,
         confidence=conf,
-        classification_status="CLASSIFIED",
+        classification_status="CLASSIFIED" if norm_type != "unknown" else "UNKNOWN",
         loan_type=loan_type,
         classification_reason=class_res.get("classification_reason", "")
     )
 
-    # Semantic upload validation
-    is_acceptable = is_document_acceptable_for_requirement(detected_type, req_def)
-
-    if is_acceptable:
-        doc_rec.upload_status = "accepted"
-    else:
-        doc_rec.upload_status = "wrong_document"
-
-    db.commit()
+    # Log structured pipeline trace
+    raw_snippet = (class_res.get("classification_reason", "") or "")[:200].replace("\n", " ")
+    logger.info(
+        f"[PIPELINE TRACE] file_name='{safe_name}' | "
+        f"file_type='{ext}' | "
+        f"detected_mime='{file.content_type}' | "
+        f"page_count={page_count} | "
+        f"extraction_method='{method}' | "
+        f"text_length={text_length} | "
+        f"raw_extracted_snippet='{raw_snippet}' | "
+        f"ocr_used={ocr_used} | "
+        f"ocr_success={ocr_success} | "
+        f"classification_prediction='{norm_type}' | "
+        f"confidence={conf:.2f} | "
+        f"acceptance_status='{upload_status.upper()}' | "
+        f"requirement_slot='{requirement_id}'"
+    )
 
     status_obj = _build_application_status_db(application_id, db)
     slot_info = next((s for s in status_obj.slots if s.requirement_id == requirement_id), None)
@@ -599,6 +651,11 @@ async def upload_slot_document(
         "application_id": application_id,
         "requirement_id": requirement_id,
         "document_id": doc_rec.id,
+        "canonical_document_type": norm_type,
+        "display_document_type": get_display_document_type(norm_type),
+        "is_valid_for_slot": is_acceptable,
+        "slot_status": "accepted" if is_acceptable else "rejected",
+        "wrong_document": not is_acceptable,
         "slot": slot_info.model_dump() if slot_info else {},
         "classification_result": class_res,
         "application_status": status_obj.model_dump()
@@ -608,13 +665,82 @@ async def upload_slot_document(
 @app.delete("/api/applications/{application_id}/slot/{requirement_id}")
 async def remove_slot_document(application_id: str, requirement_id: str, db: Session = Depends(get_db)):
     """Removes an uploaded document from a requirement slot in SQLite."""
-    docs = repos.get_documents(db, application_id)
-    target_doc = next((d for d in docs if d.requirement_id == requirement_id), None)
-    if target_doc:
+    docs = repos.get_documents(db, application_id, active_only=True)
+    target_docs = [d for d in docs if d.requirement_id == requirement_id]
+    for target_doc in target_docs:
         repos.delete_document(db, target_doc.id)
 
     status_obj = _build_application_status_db(application_id, db)
     return JSONResponse(content=status_obj.model_dump())
+
+
+@app.get("/api/applications/{application_id}/debug")
+async def get_application_debug(application_id: str, db: Session = Depends(get_db)):
+    """
+    Debug API endpoint returning:
+    - documents uploaded
+    - detected type per document
+    - extraction method used
+    - ocr status
+    - requirement slot mappings
+    - counter breakdown
+    - mathematical consistency check result
+    """
+    app_rec = repos.get_application(db, application_id)
+    if not app_rec:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    status_obj = _build_application_status_db(application_id, db)
+    db_docs = repos.get_documents(db, application_id, active_only=True)
+
+    docs_payload = []
+    for d in db_docs:
+        cls = d.classifications[0] if d.classifications else None
+        docs_payload.append({
+            "document_id": d.id,
+            "file_name": d.file_name,
+            "requirement_id": d.requirement_id,
+            "detected_type": d.document_type,
+            "upload_status": d.upload_status,
+            "extraction_method": d.extraction_method,
+            "ocr_used": d.ocr_used,
+            "ocr_success": d.ocr_success,
+            "extraction_error": d.extraction_error,
+            "confidence": cls.confidence if cls else None,
+            "classification_reason": cls.classification_reason if cls else None
+        })
+
+    req_slots = [s for s in status_obj.slots if s.required]
+    opt_slots = [s for s in status_obj.slots if not s.required]
+
+    valid_req = sum(1 for s in req_slots if s.status == "accepted")
+    wrong_req = sum(1 for s in req_slots if s.status not in ["accepted", "pending"])
+    missing_req = sum(1 for s in req_slots if s.status == "pending")
+    req_total = len(req_slots)
+
+    is_consistent = (valid_req + wrong_req + missing_req == req_total)
+
+    return JSONResponse(content={
+        "application_id": application_id,
+        "loan_type": app_rec.loan_type,
+        "application_status": status_obj.application_status,
+        "documents": docs_payload,
+        "requirement_slots": [s.model_dump() for s in status_obj.slots],
+        "counters": {
+            "required_total": req_total,
+            "valid_required": valid_req,
+            "wrong_required": wrong_req,
+            "missing_required": missing_req,
+            "optional_total": len(opt_slots),
+            "valid_optional": sum(1 for s in opt_slots if s.status == "accepted"),
+            "satisfied_documents": valid_req
+        },
+        "mathematical_consistency_check": {
+            "is_consistent": is_consistent,
+            "equation": f"{valid_req} (valid) + {wrong_req} (wrong) + {missing_req} (missing) == {req_total} (required_total)",
+            "satisfied_equals_valid": (valid_req == status_obj.uploaded_required_documents_count)
+        }
+    })
 
 
 @app.get("/api/applications/{application_id}/document-status")
