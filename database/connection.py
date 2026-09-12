@@ -74,13 +74,15 @@ def init_db():
     except Exception as e:
         logger.warning(f"Column migration check encountered: {e}")
 
-    # Seed document requirements
+    # Seed document requirements and loan policies
     try:
         from database.seed import seed_document_requirements
+        from policy_kb.loader import seed_loan_policies
         db = SessionLocal()
         try:
             seed_document_requirements(db)
+            seed_loan_policies(db)
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"Error seeding database requirements: {e}", exc_info=True)
+        logger.error(f"Error seeding database requirements and policies: {e}", exc_info=True)

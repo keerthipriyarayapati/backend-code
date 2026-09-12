@@ -444,6 +444,29 @@ class FinalReportDecisionAgent:
         start_time = metrics.get("start_time", time.time())
         proc_time = round((time.time() - start_time) * 1000, 2)
 
+        eligibility_dec = state.get("eligibility_decision")
+        field_evs = state.get("field_evidences") or []
+        dec_graph = state.get("decision_graph") or {}
+        telem = state.get("telemetry") or {}
+
+        if eligibility_dec:
+            el_verdict = str(eligibility_dec.get("decision", "")).upper()
+            if el_verdict == "NOT_ELIGIBLE":
+                decision = "NOT_ELIGIBLE"
+                if eligibility_dec.get("reasons"):
+                    reason = f"Underwriting Eligibility Failed: {'; '.join(eligibility_dec.get('reasons', [])[:2])}"
+                    key_findings.insert(0, f"❌ Eligibility Rule Breach: {'; '.join(eligibility_dec.get('reasons', [])[:2])}")
+            elif el_verdict in ["HUMAN_REVIEW_REQUIRED"] and decision == "PASS":
+                decision = "HUMAN_REVIEW"
+                if eligibility_dec.get("reasons"):
+                    reason = f"Eligibility requires underwriter review: {'; '.join(eligibility_dec.get('reasons', [])[:2])}"
+            elif el_verdict in ["INSUFFICIENT_EVIDENCE"] and decision == "PASS":
+                decision = "INSUFFICIENT_EVIDENCE"
+
+        pol_citation_count = len(eligibility_dec.get("rule_results", [])) if eligibility_dec else 0
+        field_ev_count = len(field_evs)
+        dg_id = dec_graph.get("graph_id") if dec_graph else None
+
         report = FinalReport(
             application_id=app_id,
             loan_type=loan_type,
@@ -460,10 +483,15 @@ class FinalReportDecisionAgent:
             key_findings=key_findings,
             recommendations=recommendations,
             executive_summary=exec_summary,
-            review_required=(decision != "PASS"),
+            review_required=(decision not in ["PASS", "ELIGIBLE"]),
             generated_by="Agent 6 — Final Report Engine",
             generation_status=gen_status,
             processing_time_ms=proc_time,
+            eligibility_decision=eligibility_dec,
+            policy_citation_count=pol_citation_count,
+            field_evidence_count=field_ev_count,
+            decision_graph_id=dg_id,
+            telemetry_summary=telem,
             errors=errors,
             next_agent="completed"
         )
@@ -487,7 +515,11 @@ class FinalReportDecisionAgent:
         extraction_results: List[Union[Dict[str, Any], DocumentExtractionResult]] = None,
         classification_results: List[Union[Dict[str, Any], DocumentClassificationResult]] = None,
         loan_type: str = "personal_loan",
-        application_id: Optional[str] = None
+        application_id: Optional[str] = None,
+        eligibility_decision: Optional[Dict[str, Any]] = None,
+        field_evidences: Optional[List[Dict[str, Any]]] = None,
+        decision_graph: Optional[Dict[str, Any]] = None,
+        telemetry: Optional[Dict[str, Any]] = None
     ) -> FinalReport:
         """
         Public execution entry point for Agent 6.
@@ -510,6 +542,10 @@ class FinalReportDecisionAgent:
             "validation_results": val_dicts,
             "cross_document_results": cross_dict,
             "risk_assessment_results": risk_dict,
+            "eligibility_decision": eligibility_decision,
+            "field_evidences": field_evidences,
+            "decision_graph": decision_graph,
+            "telemetry": telemetry,
             "errors": [],
             "processing_metrics": {},
             "next_agent": "final_report_agent"

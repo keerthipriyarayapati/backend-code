@@ -67,6 +67,12 @@ class ExtractedField(BaseModel):
     value: Any = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     source: Optional[Dict[str, Any]] = None
+    source_document: Optional[str] = None
+    page_number: int = Field(default=1)
+    evidence_text: Optional[str] = None
+    evidence_id: Optional[str] = None
+    extraction_method: Optional[str] = None
+    ocr_used: bool = False
 
 
 class DocumentExtractionResult(BaseModel):
@@ -325,6 +331,11 @@ class FinalReport(BaseModel):
     generation_status: str = Field(default="GENAI_GENERATED", description="One of: GENAI_GENERATED, DETERMINISTIC_FALLBACK, ERROR")
     processing_time_ms: float = Field(default=0.0, ge=0.0)
     agent_runtimes: Dict[str, float] = Field(default_factory=dict)
+    eligibility_decision: Optional[Dict[str, Any]] = Field(default=None)
+    policy_citation_count: int = Field(default=0)
+    field_evidence_count: int = Field(default=0)
+    decision_graph_id: Optional[str] = Field(default=None)
+    telemetry_summary: Optional[Dict[str, Any]] = Field(default=None)
     errors: List[Dict[str, Any]] = Field(default_factory=list)
     next_agent: str = Field(default="completed")
 

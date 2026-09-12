@@ -663,7 +663,11 @@
           data.validation_results || [],
           data.cross_document_results || null,
           data.risk_assessment_results || null,
-          data.final_report_results || null
+          data.final_report_results || null,
+          data.eligibility_results || null,
+          data.decision_graph || null,
+          data.telemetry || null,
+          data.field_evidence || null
         );
       } catch (err) {
         alert('Error processing application: ' + err.message);
@@ -672,7 +676,7 @@
       }
     }
 
-    function renderResults(classResults, extractResults = [], validationResults = [], crossDocResults = null, riskResults = null, finalReport = null) {
+    function renderResults(classResults, extractResults = [], validationResults = [], crossDocResults = null, riskResults = null, finalReport = null, eligibilityResults = null, decisionGraph = null, telemetry = null, fieldEvidence = null) {
       const resultsList = document.getElementById('resultsList');
       if (!classResults || classResults.length === 0) {
         resultsList.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No documents processed yet.</p>';
@@ -1173,6 +1177,272 @@
         `;
         resultsList.appendChild(agent6Card);
       }
+
+      // 5. LOAN ELIGIBILITY ENGINE CARD
+      if (eligibilityResults) {
+        const elDec = eligibilityResults.decision || 'PENDING';
+        let elColor = '#4ade80', elBg = 'rgba(34,197,94,0.15)', elBorder = '#22c55e';
+        if (elDec === 'NOT_ELIGIBLE') { elColor = '#f87171'; elBg = 'rgba(239,68,68,0.15)'; elBorder = '#ef4444'; }
+        else if (elDec === 'HUMAN_REVIEW_REQUIRED') { elColor = '#fde047'; elBg = 'rgba(234,179,8,0.15)'; elBorder = '#eab308'; }
+        else if (elDec === 'INSUFFICIENT_EVIDENCE') { elColor = '#fb923c'; elBg = 'rgba(249,115,22,0.15)'; elBorder = '#f97316'; }
+
+        const rulesList = eligibilityResults.rule_results || [];
+        const reasons = eligibilityResults.reasons || [];
+
+        const elCard = document.createElement('div');
+        elCard.className = 'card';
+        elCard.style.border = `2px solid ${elBorder}`;
+        elCard.style.marginBottom = '24px';
+        elCard.style.background = 'linear-gradient(135deg, rgba(15,23,42,0.98), rgba(17,24,39,0.95))';
+        elCard.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+            <div>
+              <div style="font-size: 0.75rem; font-weight: 800; color: #38bdf8; letter-spacing: 1.5px;">FEATURE 1 & 2 — LOAN ELIGIBILITY ENGINE & POLICY KNOWLEDGE BASE</div>
+              <h2 style="font-size: 1.25rem; font-weight: 900; color: #ffffff; margin-top: 2px;">Underwriting Policy & Eligibility Determination</h2>
+              <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 2px;">
+                Policy Provenance: <strong style="color: #60a5fa;">DEMO_POLICY</strong> | Rules Evaluated: <strong>${eligibilityResults.rules_evaluated_count || rulesList.length}</strong>
+              </div>
+            </div>
+            <div style="text-align: right;">
+              <span class="badge" style="background: ${elBg}; color: ${elColor}; border: 2px solid ${elBorder}; font-size: 1rem; padding: 6px 14px; font-weight: 900; display: inline-block;">
+                ${elDec.replace(/_/g, ' ')}
+              </span>
+              <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
+                Passed: <strong style="color: #4ade80;">${eligibilityResults.rules_passed_count || 0}</strong> | Failed: <strong style="color: #f87171;">${eligibilityResults.rules_failed_count || 0}</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- REASONS BOX -->
+          ${reasons.length > 0 ? `
+            <div style="background: rgba(0,0,0,0.3); border-left: 4px solid ${elBorder}; padding: 10px 14px; border-radius: 4px; margin-bottom: 14px;">
+              <div style="font-size: 0.75rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Eligibility Assessment Rationale</div>
+              <ul style="padding-left: 18px; margin: 0; font-size: 0.85rem; color: #e2e8f0; line-height: 1.5;">
+                ${reasons.map(r => `<li>${r}</li>`).join('')}
+              </ul>
+            </div>
+          ` : ''}
+
+          <!-- POLICY RULES TABLE -->
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8rem;">
+              <thead>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); text-transform: uppercase; font-size: 0.72rem;">
+                  <th style="padding: 8px;">Rule Code</th>
+                  <th style="padding: 8px;">Category</th>
+                  <th style="padding: 8px;">Condition</th>
+                  <th style="padding: 8px;">Actual Value</th>
+                  <th style="padding: 8px;">Status</th>
+                  <th style="padding: 8px;">Severity</th>
+                  <th style="padding: 8px;">Source Citation</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rulesList.map(r => {
+                  let sColor = '#4ade80', sIcon = '✓';
+                  if (r.status === 'FAIL') { sColor = '#f87171'; sIcon = '✕'; }
+                  else if (r.status === 'INSUFFICIENT_EVIDENCE' || r.status === 'SKIPPED') { sColor = '#fde047'; sIcon = '○'; }
+                  return `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                      <td style="padding: 8px; font-weight: 700; color: #ffffff;">${r.rule_code}</td>
+                      <td style="padding: 8px; color: #60a5fa;">${r.category}</td>
+                      <td style="padding: 8px; color: #cbd5e1; font-family: monospace;">${r.operator} ${r.expected_value || ''}</td>
+                      <td style="padding: 8px; font-weight: 600; color: #ffffff; font-family: monospace;">${r.actual_value !== null && r.actual_value !== undefined ? r.actual_value : '<span style="color:#64748b;">missing</span>'}</td>
+                      <td style="padding: 8px;"><span style="color: ${sColor}; font-weight: 700;">${sIcon} ${r.status}</span></td>
+                      <td style="padding: 8px; font-size: 0.75rem; color: ${r.severity === 'CRITICAL' ? '#f87171' : '#fb923c'};">${r.severity}</td>
+                      <td style="padding: 8px; font-size: 0.72rem; color: #94a3b8;">DEMO_POLICY (Sec. Underwriting)</td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+        resultsList.appendChild(elCard);
+      }
+
+      // 6. EVIDENCE-BASED DECISION GRAPH CARD
+      if (decisionGraph) {
+        const dgNodes = decisionGraph.nodes || [];
+        const dgEdges = decisionGraph.edges || [];
+
+        const dgCard = document.createElement('div');
+        dgCard.className = 'card';
+        dgCard.style.border = '2px solid #38bdf8';
+        dgCard.style.marginBottom = '24px';
+        dgCard.style.background = 'linear-gradient(135deg, rgba(15,23,42,0.98), rgba(24,24,37,0.95))';
+
+        const nodesHtml = dgNodes.map((n, i) => {
+          let nColor = '#4ade80', nBg = 'rgba(34,197,94,0.1)', nBorder = '#22c55e';
+          if (n.status === 'FAIL') { nColor = '#f87171'; nBg = 'rgba(239,68,68,0.1)'; nBorder = '#ef4444'; }
+          else if (n.status === 'WARNING') { nColor = '#fde047'; nBg = 'rgba(234,179,8,0.1)'; nBorder = '#eab308'; }
+          else if (n.status === 'INFO') { nColor = '#38bdf8'; nBg = 'rgba(56,189,248,0.1)'; nBorder = '#38bdf8'; }
+
+          const hasNext = i < dgNodes.length - 1;
+          const arrowHtml = hasNext ? `<div style="color: #64748b; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; padding: 0 4px;">➔</div>` : '';
+
+          return `
+            <div style="display: flex; align-items: center; margin-bottom: 8px;">
+              <div onclick="showNodeDetails('${n.node_id}')" style="background: ${nBg}; border: 1.5px solid ${nBorder}; border-radius: 8px; padding: 10px 14px; min-width: 170px; cursor: pointer; transition: transform 0.15s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.3);" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #94a3b8; text-transform: uppercase;">STAGE ${i + 1}</div>
+                <div style="font-size: 0.85rem; font-weight: 700; color: #ffffff; margin-top: 2px;">${n.label}</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+                  <span style="font-size: 0.72rem; font-weight: 800; color: ${nColor};">${n.status}</span>
+                  <span style="font-size: 0.68rem; color: #64748b;">${n.evidence_count} evidence</span>
+                </div>
+              </div>
+              ${arrowHtml}
+            </div>
+          `;
+        }).join('');
+
+        dgCard.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <div style="font-size: 0.75rem; font-weight: 800; color: #38bdf8; letter-spacing: 1.5px;">FEATURE 4 — EVIDENCE-BASED DECISION GRAPH</div>
+              <h2 style="font-size: 1.25rem; font-weight: 900; color: #ffffff; margin-top: 2px;">11-Stage End-to-End Decision Topology</h2>
+            </div>
+            <div style="display: flex; gap: 10px; font-size: 0.75rem;">
+              <span style="background: rgba(34,197,94,0.15); color: #4ade80; padding: 4px 8px; border-radius: 4px; font-weight: 700;">PASS: ${decisionGraph.passed_nodes}</span>
+              <span style="background: rgba(234,179,8,0.15); color: #fde047; padding: 4px 8px; border-radius: 4px; font-weight: 700;">WARN: ${decisionGraph.warning_nodes}</span>
+              <span style="background: rgba(239,68,68,0.15); color: #f87171; padding: 4px 8px; border-radius: 4px; font-weight: 700;">FAIL: ${decisionGraph.failed_nodes}</span>
+            </div>
+          </div>
+
+          <!-- INTERACTIVE GRAPH CANVAS -->
+          <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px 0; overflow-x: auto;">
+            ${nodesHtml}
+          </div>
+
+          <!-- NODE DETAIL INSPECTION PANEL -->
+          <div id="dgNodeDetailsPanel" style="display: none; background: rgba(0,0,0,0.4); border: 1px solid var(--border); padding: 12px 16px; border-radius: 6px; margin-top: 12px;">
+            <div id="dgNodeDetailsContent" style="font-size: 0.85rem; color: #e2e8f0;"></div>
+          </div>
+        `;
+        resultsList.appendChild(dgCard);
+
+        // Store graph nodes globally for click inspection
+        window._currentDecisionGraphNodes = dgNodes;
+      }
+
+      // 7. FIELD-LEVEL EVIDENCE & CITATIONS CARD
+      if (fieldEvidence && fieldEvidence.length > 0) {
+        const evCard = document.createElement('div');
+        evCard.className = 'card';
+        evCard.style.border = '1px solid var(--border)';
+        evCard.style.marginBottom = '24px';
+        evCard.style.background = 'rgba(15,23,42,0.9)';
+        evCard.innerHTML = `
+          <div style="border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 14px;">
+            <div style="font-size: 0.75rem; font-weight: 800; color: #38bdf8; letter-spacing: 1.5px;">FEATURE 3 — FIELD-LEVEL & DECISION EVIDENCE CITATIONS</div>
+            <h2 style="font-size: 1.2rem; font-weight: 800; color: #ffffff; margin-top: 2px;">Extraction Snippets, Page Coordinates & Provenance</h2>
+            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">
+              Total Citations: <strong style="color: #60a5fa;">${fieldEvidence.length}</strong> | Sensitive PII masked (PAN, Account, Aadhaar)
+            </div>
+          </div>
+
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.78rem;">
+              <thead>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); text-transform: uppercase; font-size: 0.7rem;">
+                  <th style="padding: 6px 8px;">Document Type</th>
+                  <th style="padding: 6px 8px;">Field Name</th>
+                  <th style="padding: 6px 8px;">Extracted Value (Masked)</th>
+                  <th style="padding: 6px 8px;">Page</th>
+                  <th style="padding: 6px 8px;">Verbatim Source Snippet</th>
+                  <th style="padding: 6px 8px;">Method</th>
+                  <th style="padding: 6px 8px;">Conf</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${fieldEvidence.slice(0, 15).map(ev => `
+                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                    <td style="padding: 6px 8px; color: #60a5fa; font-weight: 600;">${ev.document_type || 'Document'}</td>
+                    <td style="padding: 6px 8px; font-weight: 600; color: #ffffff;">${ev.field_name}</td>
+                    <td style="padding: 6px 8px; font-family: monospace; color: #4ade80;">${ev.extracted_value || 'null'}</td>
+                    <td style="padding: 6px 8px; text-align: center; color: #cbd5e1;">P.${ev.source_page || 1}</td>
+                    <td style="padding: 6px 8px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #94a3b8; font-family: monospace; font-size: 0.72rem;" title="${(ev.snippet || '').replace(/"/g, '&quot;')}">${ev.snippet || 'Extracted from document body'}</td>
+                    <td style="padding: 6px 8px; font-size: 0.7rem; color: #64748b;">${ev.ocr_used ? 'OCR Fallback' : (ev.extraction_method || 'Regex')}</td>
+                    <td style="padding: 6px 8px; color: #10b981; font-weight: 600;">${((ev.confidence || 1.0) * 100).toFixed(0)}%</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+        resultsList.appendChild(evCard);
+      }
+
+      // 8. TELEMETRY & SYSTEM PERFORMANCE CARD
+      if (telemetry) {
+        const totalMs = telemetry.total_pipeline_duration_ms || 0;
+        const memMb = telemetry.memory_mb || 0;
+        const agentDurs = telemetry.agent_durations || {};
+
+        const telemCard = document.createElement('div');
+        telemCard.className = 'card';
+        telemCard.style.border = '1px solid #10b981';
+        telemCard.style.marginBottom = '24px';
+        telemCard.style.background = 'linear-gradient(135deg, rgba(15,23,42,0.98), rgba(6,78,59,0.2))';
+        telemCard.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <div style="font-size: 0.75rem; font-weight: 800; color: #34d399; letter-spacing: 1.5px;">FEATURE 5 — SYSTEM TELEMETRY & REAL TIMING METRICS</div>
+              <h2 style="font-size: 1.2rem; font-weight: 800; color: #ffffff; margin-top: 2px;">Measured Execution Performance & Resource Usage</h2>
+            </div>
+            <div style="display: flex; gap: 12px; align-items: center;">
+              <div style="text-align: right;">
+                <div style="font-size: 0.72rem; color: var(--text-muted);">Wall-Clock Time</div>
+                <div style="font-size: 1.3rem; font-weight: 900; color: #34d399;">${totalMs.toFixed(1)} ms</div>
+              </div>
+              <div style="text-align: right;">
+                <div style="font-size: 0.72rem; color: var(--text-muted);">Process RSS Memory</div>
+                <div style="font-size: 1.3rem; font-weight: 900; color: #60a5fa;">${memMb.toFixed(1)} MB</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- AGENT RUNTIME BREAKDOWN BARS -->
+          <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px;">Granular Agent & Sub-Engine Durations</div>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+            ${Object.entries(agentDurs).map(([agName, agMs]) => `
+              <div style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06); padding: 8px 10px; border-radius: 6px;">
+                <div style="display: flex; justify-content: space-between; font-size: 0.78rem;">
+                  <span style="color: #cbd5e1; font-weight: 600;">${agName.replace(/_/g, ' ').toUpperCase()}</span>
+                  <span style="color: #34d399; font-weight: 700;">${Number(agMs).toFixed(1)} ms</span>
+                </div>
+                <div style="background: rgba(255,255,255,0.08); height: 4px; border-radius: 2px; margin-top: 6px; overflow: hidden;">
+                  <div style="background: #10b981; height: 100%; width: ${Math.min(100, Math.max(5, (agMs / (totalMs || 1)) * 100))}%;"></div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+        resultsList.appendChild(telemCard);
+      }
+    }
+
+    function showNodeDetails(nodeId) {
+      const panel = document.getElementById('dgNodeDetailsPanel');
+      const content = document.getElementById('dgNodeDetailsContent');
+      if (!panel || !content || !window._currentDecisionGraphNodes) return;
+
+      const node = window._currentDecisionGraphNodes.find(n => n.node_id === nodeId);
+      if (!node) return;
+
+      panel.style.display = 'block';
+      content.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <div><strong style="color: #38bdf8; font-size: 0.95rem;">${node.label}</strong> <span style="font-size: 0.75rem; color: #94a3b8;">(${node.stage_name})</span></div>
+          <button onclick="document.getElementById('dgNodeDetailsPanel').style.display='none'" style="background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 1rem;">✕</button>
+        </div>
+        <div style="color: #f1f5f9; margin-bottom: 6px;">${node.description || 'Stage evaluated successfully.'}</div>
+        <div style="display: flex; gap: 14px; font-size: 0.75rem; color: #94a3b8;">
+          <span>Responsible Agent: <strong style="color: #ffffff;">${node.agent_name || 'Pipeline'}</strong></span>
+          <span>Status: <strong style="color: ${node.status === 'PASS' ? '#4ade80' : (node.status === 'FAIL' ? '#f87171' : '#fde047')};">${node.status}</strong></span>
+          <span>Evidence Count: <strong style="color: #60a5fa;">${node.evidence_count}</strong></span>
+        </div>
+      `;
     }
 
     async function downloadPdfReport(appId) {

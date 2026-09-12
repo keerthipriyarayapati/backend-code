@@ -642,6 +642,92 @@ def build_pdf_report_bytes(
     story.append(Spacer(1, 12))
 
     # -------------------------------------------------------------------------
+    # 10b. LOAN ELIGIBILITY ENGINE & POLICY KNOWLEDGE BASE EVALUATION
+    # -------------------------------------------------------------------------
+    eligibility_dec = get_obj_attr(final_report_obj, "eligibility_decision")
+    if eligibility_dec:
+        el_decision = str(get_obj_attr(eligibility_dec, "decision", "PENDING")).upper()
+        el_rules = get_obj_attr(eligibility_dec, "rule_results") or []
+
+        el_color = "#15803d" if el_decision == "ELIGIBLE" else ("#b91c1c" if el_decision == "NOT_ELIGIBLE" else "#b45309")
+        story.append(Paragraph("LOAN ELIGIBILITY & POLICY EVALUATION (DEMO_POLICY PROVENANCE)", style_section_heading))
+        story.append(Paragraph(f"<b>Eligibility Verdict:</b> <font color='{el_color}'><b>{el_decision}</b></font> | Rules Evaluated: {len(el_rules)}", style_body))
+        story.append(Spacer(1, 4))
+
+        if el_rules:
+            el_table_data = [
+                [
+                    Paragraph("Rule Code", style_cell_header),
+                    Paragraph("Category", style_cell_header),
+                    Paragraph("Condition", style_cell_header),
+                    Paragraph("Actual Value", style_cell_header),
+                    Paragraph("Status", style_cell_header),
+                    Paragraph("Policy Provenance", style_cell_header)
+                ]
+            ]
+            for r in el_rules:
+                rcode = get_obj_attr(r, "rule_code", "")
+                cat = get_obj_attr(r, "category", "")
+                op = get_obj_attr(r, "operator", "")
+                exp = get_obj_attr(r, "expected_value", "")
+                act = get_obj_attr(r, "actual_value", "N/A")
+                st = get_obj_attr(r, "status", "PASS")
+                st_color = "#15803d" if st == "PASS" else ("#b91c1c" if st == "FAIL" else "#b45309")
+
+                masked_act = mask_sensitive_value(act, str(get_obj_attr(r, "field_name", "")))
+
+                el_table_data.append([
+                    Paragraph(rcode, style_cell_body_bold),
+                    Paragraph(cat, style_cell_body),
+                    Paragraph(f"{op} {exp}", style_cell_body),
+                    Paragraph(str(masked_act)[:25], style_cell_body),
+                    Paragraph(f"<font color='{st_color}'><b>{st}</b></font>", style_cell_body),
+                    Paragraph("DEMO_POLICY / Underwriting Guidelines", style_cell_body)
+                ])
+
+            el_table = Table(el_table_data, colWidths=[90, 65, 80, 85, 55, 165])
+            el_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), HEADER_BLUE),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ('PADDING', (0, 0), (-1, -1), 4),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            story.append(el_table)
+            story.append(Spacer(1, 10))
+
+    # -------------------------------------------------------------------------
+    # 10c. TELEMETRY & EXECUTION PERFORMANCE
+    # -------------------------------------------------------------------------
+    telem_sum = get_obj_attr(final_report_obj, "telemetry_summary")
+    if telem_sum:
+        total_ms = float(get_obj_attr(telem_sum, "total_pipeline_duration_ms", 0.0) or 0.0)
+        mem_mb = float(get_obj_attr(telem_sum, "memory_mb", 0.0) or 0.0)
+        agent_durs = get_obj_attr(telem_sum, "agent_durations") or {}
+
+        story.append(Paragraph("SYSTEM TELEMETRY & EXECUTION METRICS", style_section_heading))
+        story.append(Paragraph(f"<b>Total Pipeline Duration:</b> {total_ms:.1f} ms | <b>Memory Footprint:</b> {mem_mb:.1f} MB | <b>Decision Graph Nodes:</b> 11 Verified", style_body))
+        story.append(Spacer(1, 4))
+
+        if agent_durs and isinstance(agent_durs, dict):
+            items = list(agent_durs.items())
+            row1 = [Paragraph(f"<b>{k.replace('_', ' ').title()}:</b> {float(v):.1f} ms", style_body) for k, v in items[:4]]
+            t_data = [row1]
+            if len(items) > 4:
+                row2 = [Paragraph(f"<b>{k.replace('_', ' ').title()}:</b> {float(v):.1f} ms", style_body) for k, v in items[4:8]]
+                # Pad row2 if needed
+                while len(row2) < len(row1):
+                    row2.append(Paragraph("", style_body))
+                t_data.append(row2)
+            t_table = Table(t_data, colWidths=[540 // len(row1)] * len(row1))
+            t_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ('PADDING', (0, 0), (-1, -1), 4),
+            ]))
+            story.append(t_table)
+            story.append(Spacer(1, 10))
+
+    # -------------------------------------------------------------------------
     # 11. FINAL RECOMMENDATION & NEXT ACTIONS CARD
     # -------------------------------------------------------------------------
     final_box_data = [

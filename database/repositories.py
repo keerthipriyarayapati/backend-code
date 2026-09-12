@@ -23,7 +23,19 @@ from database.models import (
     RiskAssessmentModel,
     RiskFactorModel,
     FinalReportModel,
-    ProcessingRunModel
+    ProcessingRunModel,
+    LoanPolicyModel,
+    PolicyRuleModel,
+    PolicyRequiredDocumentModel,
+    PolicyRequiredFieldModel,
+    FieldEvidenceModel,
+    DecisionGraphModel,
+    DecisionGraphNodeModel,
+    DecisionGraphEdgeModel,
+    EligibilityResultModel,
+    EligibilityRuleResultModel,
+    AgentExecutionLogModel,
+    TelemetryMetricsModel
 )
 
 logger = logging.getLogger("DatabaseRepositories")
@@ -321,7 +333,7 @@ def save_extracted_fields(
             src = val_info.get("source", {})
             if isinstance(src, dict):
                 src_page = src.get("page", 1)
-                src_text = src.get("snippet") or src.get("raw_text")
+                src_text = src.get("snippet") or src.get("raw_text") or src.get("text")
         else:
             val = str(val_info) if val_info is not None else None
             conf = 1.0
@@ -340,6 +352,45 @@ def save_extracted_fields(
         )
         db.add(rec)
         saved_records.append(rec)
+
+    # Automatically synchronize to field_evidence table
+    try:
+        from agents.agent_5_risk.agent import mask_sensitive_value
+        doc = get_document_by_id(db, document_id)
+        if doc and doc.application_id:
+            for rec in saved_records:
+                if rec.field_value:
+                    ev_id = f"EV_{doc.application_id}_{rec.field_name}_{document_id}"
+                    existing_ev = db.query(FieldEvidenceModel).filter(FieldEvidenceModel.evidence_id == ev_id).first()
+                    masked_val = mask_sensitive_value(rec.field_value, rec.field_name)
+                    if existing_ev:
+                        existing_ev.extracted_value = masked_val
+                        existing_ev.raw_value = masked_val
+                        existing_ev.snippet = rec.source_text
+                        existing_ev.source_page = rec.source_page
+                        existing_ev.confidence = rec.confidence
+                    else:
+                        ev_item = FieldEvidenceModel(
+                            evidence_id=ev_id,
+                            application_id=doc.application_id,
+                            document_id=document_id,
+                            slot_id=doc.requirement_id,
+                            document_type=doc.document_type,
+                            field_name=rec.field_name,
+                            extracted_value=masked_val,
+                            raw_value=masked_val,
+                            normalized_value=rec.normalized_value,
+                            source_page=rec.source_page,
+                            snippet=rec.source_text,
+                            extraction_method=rec.extraction_method,
+                            ocr_used=bool(doc.ocr_used),
+                            confidence=rec.confidence,
+                            validation_status="EXTRACTED",
+                            created_at=datetime.utcnow()
+                        )
+                        db.add(ev_item)
+    except Exception as e:
+        logger.warning(f"Error synchronizing field evidence for doc {document_id}: {e}")
 
     db.commit()
     return saved_records
@@ -689,3 +740,493 @@ def update_processing_run(
         db.commit()
         db.refresh(run)
     return run
+
+
+# =============================================================================
+# 12. LOAN POLICY REPOSITORY
+# =============================================================================
+
+def upsert_loan_policy(
+    db: Session,
+    policy_data: Dict[str, Any],
+    rules_data: List[Dict[str, Any]],
+    required_docs_data: List[Dict[str, Any]],
+    required_fields_data: Optional[List[Dict[str, Any]]] = None
+) -> LoanPolicyModel:
+    """Upserts a loan policy along with its rules and document requirements."""
+    policy_id = policy_data["policy_id"]
+    existing = db.query(LoanPolicyModel).filter(LoanPolicyModel.policy_id == policy_id).first()
+    
+    if existing:
+        for k, v in policy_data.items():
+            setattr(existing, k, v)
+        existing.updated_at = datetime.utcnow()
+        policy = existing
+        # Clear old associated rules/docs/fields to refresh cleanly
+        db.query(PolicyRuleModel).filter(PolicyRuleModel.policy_id == policy_id).delete()
+        db.query(PolicyRequiredDocumentModel).filter(PolicyRequiredDocumentModel.policy_id == policy_id).delete()
+        db.query(PolicyRequiredFieldModel).filter(PolicyRequiredFieldModel.policy_id == policy_id).delete()
+    else:
+        policy = LoanPolicyModel(**policy_data)
+        db.add(policy)
+
+    db.flush()
+
+    for r in rules_data:
+        r_copy = dict(r)
+        r_copy["policy_id"] = policy_id
+        db.add(PolicyRuleModel(**r_copy))
+
+    for d in required_docs_data:
+        d_copy = dict(d)
+        d_copy["policy_id"] = policy_id
+        db.add(PolicyRequiredDocumentModel(**d_copy))
+
+    if required_fields_data:
+        for f in required_fields_data:
+            f_copy = dict(f)
+            f_copy["policy_id"] = policy_id
+            db.add(PolicyRequiredFieldModel(**f_copy))
+
+    db.commit()
+    db.refresh(policy)
+    return policy
+
+
+def get_policy_by_type(db: Session, loan_type: str) -> Optional[LoanPolicyModel]:
+    """Retrieves active loan policy by normalized loan type."""
+    normalized = loan_type.strip().lower()
+    policies = db.query(LoanPolicyModel).filter(LoanPolicyModel.status == "ACTIVE").all()
+    for p in policies:
+        if p.loan_type.strip().lower() == normalized or p.loan_type.strip().lower().replace(" ", "_") == normalized.replace(" ", "_"):
+            return p
+    return None
+
+
+def list_all_policies(db: Session) -> List[Dict[str, Any]]:
+    """Lists all loan policies with rules summary."""
+    policies = db.query(LoanPolicyModel).all()
+    res = []
+    for p in policies:
+        res.append({
+            "policy_id": p.policy_id,
+            "loan_type": p.loan_type,
+            "policy_name": p.policy_name,
+            "version": p.version,
+            "description": p.description,
+            "effective_date": p.effective_date,
+            "source_type": p.source_type,
+            "source_document": p.source_document,
+            "source_section": p.source_section,
+            "source_page": p.source_page,
+            "status": p.status,
+            "rules_count": len(p.rules),
+            "required_docs_count": len(p.required_documents),
+            "rules": [
+                {
+                    "rule_id": r.rule_id,
+                    "rule_code": r.rule_code,
+                    "category": r.category,
+                    "field_name": r.field_name,
+                    "operator": r.operator,
+                    "expected_value": r.expected_value,
+                    "threshold_value": r.threshold_value,
+                    "severity": r.severity,
+                    "mandatory": r.mandatory,
+                    "error_message": r.error_message,
+                    "source_type": r.source_type,
+                    "source_document": r.source_document,
+                    "source_section": r.source_section,
+                    "source_page": r.source_page
+                } for r in p.rules
+            ],
+            "required_documents": [
+                {
+                    "slot_id": d.slot_id,
+                    "document_type": d.document_type,
+                    "display_name": d.display_name,
+                    "required": d.required
+                } for d in p.required_documents
+            ]
+        })
+    return res
+
+
+# =============================================================================
+# 13. FIELD EVIDENCE REPOSITORY
+# =============================================================================
+
+def save_field_evidence_batch(
+    db: Session,
+    evidence_list: List[Dict[str, Any]]
+) -> List[FieldEvidenceModel]:
+    """Saves a batch of field-level evidence citations."""
+    records = []
+    for item in evidence_list:
+        ev_id = item.get("evidence_id")
+        existing = None
+        if ev_id:
+            existing = db.query(FieldEvidenceModel).filter(FieldEvidenceModel.evidence_id == ev_id).first()
+        
+        if existing:
+            for k, v in item.items():
+                setattr(existing, k, v)
+            records.append(existing)
+        else:
+            rec = FieldEvidenceModel(
+                evidence_id=item["evidence_id"],
+                application_id=item["application_id"],
+                document_id=item.get("document_id"),
+                slot_id=item.get("slot_id"),
+                document_type=item.get("document_type"),
+                field_name=item["field_name"],
+                extracted_value=item.get("extracted_value"),
+                raw_value=item.get("raw_value"),
+                normalized_value=item.get("normalized_value"),
+                source_page=item.get("source_page", 1),
+                snippet=item.get("snippet"),
+                bounding_box_json=json.dumps(item["bounding_box"]) if isinstance(item.get("bounding_box"), (dict, list)) else item.get("bounding_box_json"),
+                extraction_method=item.get("extraction_method", "Regex / Key-Value Extractor"),
+                ocr_used=item.get("ocr_used", False),
+                confidence=item.get("confidence", 1.0),
+                validation_status=item.get("validation_status", "VALIDATED"),
+                created_at=datetime.utcnow()
+            )
+            db.add(rec)
+            records.append(rec)
+    db.commit()
+    return records
+
+
+def get_field_evidence_by_application(db: Session, application_id: str) -> List[Dict[str, Any]]:
+    """Retrieves all field evidence citations for an application."""
+    records = db.query(FieldEvidenceModel).filter(FieldEvidenceModel.application_id == application_id).all()
+    res = []
+    for r in records:
+        res.append({
+            "evidence_id": r.evidence_id,
+            "application_id": r.application_id,
+            "document_id": r.document_id,
+            "slot_id": r.slot_id,
+            "document_type": r.document_type,
+            "field_name": r.field_name,
+            "extracted_value": r.extracted_value,
+            "raw_value": r.raw_value,
+            "normalized_value": r.normalized_value,
+            "source_page": r.source_page,
+            "snippet": r.snippet,
+            "bounding_box": json.loads(r.bounding_box_json) if r.bounding_box_json else None,
+            "extraction_method": r.extraction_method,
+            "ocr_used": r.ocr_used,
+            "confidence": r.confidence,
+            "validation_status": r.validation_status,
+            "created_at": r.created_at.isoformat() if r.created_at else None
+        })
+    return res
+
+
+def get_evidence_by_id(db: Session, evidence_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves a single field evidence by evidence_id."""
+    r = db.query(FieldEvidenceModel).filter(FieldEvidenceModel.evidence_id == evidence_id).first()
+    if not r:
+        return None
+    return {
+        "evidence_id": r.evidence_id,
+        "application_id": r.application_id,
+        "document_id": r.document_id,
+        "slot_id": r.slot_id,
+        "document_type": r.document_type,
+        "field_name": r.field_name,
+        "extracted_value": r.extracted_value,
+        "source_page": r.source_page,
+        "snippet": r.snippet,
+        "extraction_method": r.extraction_method,
+        "ocr_used": r.ocr_used,
+        "confidence": r.confidence,
+        "validation_status": r.validation_status
+    }
+
+
+# =============================================================================
+# 14. DECISION GRAPH REPOSITORY
+# =============================================================================
+
+def save_decision_graph(
+    db: Session,
+    graph_data: Dict[str, Any],
+    nodes_data: List[Dict[str, Any]],
+    edges_data: List[Dict[str, Any]]
+) -> DecisionGraphModel:
+    """Saves decision graph with all its nodes and edges."""
+    graph_id = graph_data["graph_id"]
+    existing = db.query(DecisionGraphModel).filter(DecisionGraphModel.graph_id == graph_id).first()
+    if existing:
+        db.query(DecisionGraphNodeModel).filter(DecisionGraphNodeModel.graph_id == graph_id).delete()
+        db.query(DecisionGraphEdgeModel).filter(DecisionGraphEdgeModel.graph_id == graph_id).delete()
+        for k, v in graph_data.items():
+            setattr(existing, k, v)
+        graph = existing
+    else:
+        graph = DecisionGraphModel(**graph_data)
+        db.add(graph)
+
+    db.flush()
+
+    for n in nodes_data:
+        n_copy = dict(n)
+        n_copy["graph_id"] = graph_id
+        if "node_metadata" in n_copy:
+            n_copy["node_metadata_json"] = json.dumps(n_copy.pop("node_metadata"))
+        db.add(DecisionGraphNodeModel(**n_copy))
+
+    for e in edges_data:
+        e_copy = dict(e)
+        e_copy["graph_id"] = graph_id
+        db.add(DecisionGraphEdgeModel(**e_copy))
+
+    db.commit()
+    db.refresh(graph)
+    return graph
+
+
+def get_decision_graph_by_application(db: Session, application_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves decision graph with nodes and edges for an application."""
+    graph = (
+        db.query(DecisionGraphModel)
+        .filter(DecisionGraphModel.application_id == application_id)
+        .order_by(DecisionGraphModel.created_at.desc())
+        .first()
+    )
+    if not graph:
+        return None
+
+    return {
+        "graph_id": graph.graph_id,
+        "application_id": graph.application_id,
+        "total_nodes": graph.total_nodes,
+        "total_edges": graph.total_edges,
+        "passed_nodes": graph.passed_nodes,
+        "failed_nodes": graph.failed_nodes,
+        "warning_nodes": graph.warning_nodes,
+        "info_nodes": graph.info_nodes,
+        "created_at": graph.created_at.isoformat() if graph.created_at else None,
+        "nodes": [
+            {
+                "node_id": n.node_id,
+                "stage_name": n.stage_name,
+                "label": n.label,
+                "status": n.status,
+                "agent_name": n.agent_name,
+                "description": n.description,
+                "evidence_count": n.evidence_count,
+                "citation_count": n.citation_count,
+                "node_metadata": json.loads(n.node_metadata_json) if n.node_metadata_json else {}
+            } for n in graph.nodes
+        ],
+        "edges": [
+            {
+                "source": e.source_node_id,
+                "target": e.target_node_id,
+                "label": e.edge_label,
+                "type": e.edge_type
+            } for e in graph.edges
+        ]
+    }
+
+
+# =============================================================================
+# 15. ELIGIBILITY RESULTS REPOSITORY
+# =============================================================================
+
+def save_eligibility_result(
+    db: Session,
+    eligibility_data: Dict[str, Any],
+    rule_results_data: List[Dict[str, Any]]
+) -> EligibilityResultModel:
+    """Saves eligibility engine decision and rule results."""
+    el_id = eligibility_data["eligibility_id"]
+    existing = db.query(EligibilityResultModel).filter(EligibilityResultModel.eligibility_id == el_id).first()
+    if existing:
+        db.query(EligibilityRuleResultModel).filter(EligibilityRuleResultModel.eligibility_id == el_id).delete()
+        for k, v in eligibility_data.items():
+            if k == "reasons" and isinstance(v, list):
+                setattr(existing, "reasons_json", json.dumps(v))
+            else:
+                setattr(existing, k, v)
+        res = existing
+    else:
+        d_copy = dict(eligibility_data)
+        if "reasons" in d_copy and isinstance(d_copy["reasons"], list):
+            d_copy["reasons_json"] = json.dumps(d_copy.pop("reasons"))
+        res = EligibilityResultModel(**d_copy)
+        db.add(res)
+
+    db.flush()
+
+    for rr in rule_results_data:
+        rr_copy = dict(rr)
+        rr_copy["eligibility_id"] = el_id
+        db.add(EligibilityRuleResultModel(**rr_copy))
+
+    db.commit()
+    db.refresh(res)
+    return res
+
+
+def get_eligibility_by_application(db: Session, application_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves eligibility engine decision and rule breakdown for an application."""
+    res = (
+        db.query(EligibilityResultModel)
+        .filter(EligibilityResultModel.application_id == application_id)
+        .order_by(EligibilityResultModel.created_at.desc())
+        .first()
+    )
+    if not res:
+        return None
+
+    return {
+        "eligibility_id": res.eligibility_id,
+        "application_id": res.application_id,
+        "loan_type": res.loan_type,
+        "decision": res.decision,
+        "confidence": res.confidence,
+        "reasons": json.loads(res.reasons_json) if res.reasons_json else [],
+        "rules_evaluated_count": res.rules_evaluated_count,
+        "rules_passed_count": res.rules_passed_count,
+        "rules_failed_count": res.rules_failed_count,
+        "rules_skipped_count": res.rules_skipped_count,
+        "processing_time_ms": res.processing_time_ms,
+        "created_at": res.created_at.isoformat() if res.created_at else None,
+        "rule_results": [
+            {
+                "rule_code": rr.rule_code,
+                "category": rr.category,
+                "field_name": rr.field_name,
+                "operator": rr.operator,
+                "expected_value": rr.expected_value,
+                "actual_value": rr.actual_value,
+                "status": rr.status,
+                "mandatory": rr.mandatory,
+                "severity": rr.severity,
+                "failure_reason": rr.failure_reason,
+                "evidence_id": rr.evidence_id,
+                "policy_rule_id": rr.policy_rule_id
+            } for rr in res.rule_results
+        ]
+    }
+
+
+# =============================================================================
+# 16. AGENT EXECUTION LOGS & TELEMETRY REPOSITORY
+# =============================================================================
+
+def log_agent_execution(
+    db: Session,
+    application_id: str,
+    agent_name: str,
+    started_at: datetime,
+    completed_at: datetime,
+    duration_ms: float,
+    status: str = "SUCCESS",
+    input_summary: Optional[Dict[str, Any]] = None,
+    output_summary: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None
+) -> AgentExecutionLogModel:
+    """Logs individual agent execution telemetry."""
+    log_rec = AgentExecutionLogModel(
+        application_id=application_id,
+        agent_name=agent_name,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=duration_ms,
+        status=status,
+        input_summary_json=json.dumps(input_summary) if input_summary else None,
+        output_summary_json=json.dumps(output_summary) if output_summary else None,
+        error_message=error_message,
+        created_at=datetime.utcnow()
+    )
+    db.add(log_rec)
+    db.commit()
+    db.refresh(log_rec)
+    return log_rec
+
+
+def save_telemetry_metrics(
+    db: Session,
+    application_id: str,
+    metrics: Dict[str, Any]
+) -> TelemetryMetricsModel:
+    """Saves end-to-end telemetry metrics for an application run."""
+    agent_durations = metrics.get("agent_durations", {})
+    rec = TelemetryMetricsModel(
+        application_id=application_id,
+        total_pipeline_duration_ms=metrics.get("total_pipeline_duration_ms", 0.0),
+        agent_durations_json=json.dumps(agent_durations),
+        ocr_duration_ms=metrics.get("ocr_duration_ms", 0.0),
+        validation_duration_ms=metrics.get("validation_duration_ms", 0.0),
+        cross_doc_duration_ms=metrics.get("cross_doc_duration_ms", 0.0),
+        risk_duration_ms=metrics.get("risk_duration_ms", 0.0),
+        eligibility_duration_ms=metrics.get("eligibility_duration_ms", 0.0),
+        decision_graph_duration_ms=metrics.get("decision_graph_duration_ms", 0.0),
+        report_duration_ms=metrics.get("report_duration_ms", 0.0),
+        documents_count=metrics.get("documents_count", 0),
+        fields_count=metrics.get("fields_count", 0),
+        citations_count=metrics.get("citations_count", 0),
+        memory_mb=metrics.get("memory_mb", 0.0),
+        created_at=datetime.utcnow()
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return rec
+
+
+def get_telemetry_by_application(db: Session, application_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves telemetry summary and agent execution breakdown for an application."""
+    metric = (
+        db.query(TelemetryMetricsModel)
+        .filter(TelemetryMetricsModel.application_id == application_id)
+        .order_by(TelemetryMetricsModel.created_at.desc())
+        .first()
+    )
+    logs = (
+        db.query(AgentExecutionLogModel)
+        .filter(AgentExecutionLogModel.application_id == application_id)
+        .order_by(AgentExecutionLogModel.started_at.asc())
+        .all()
+    )
+
+    if not metric and not logs:
+        return None
+
+    agent_durations = json.loads(metric.agent_durations_json) if metric and metric.agent_durations_json else {}
+    return {
+        "application_id": application_id,
+        "total_pipeline_duration_ms": metric.total_pipeline_duration_ms if metric else sum(l.duration_ms for l in logs),
+        "agent_durations": agent_durations,
+        "ocr_duration_ms": metric.ocr_duration_ms if metric else 0.0,
+        "validation_duration_ms": metric.validation_duration_ms if metric else 0.0,
+        "cross_doc_duration_ms": metric.cross_doc_duration_ms if metric else 0.0,
+        "risk_duration_ms": metric.risk_duration_ms if metric else 0.0,
+        "eligibility_duration_ms": metric.eligibility_duration_ms if metric else 0.0,
+        "decision_graph_duration_ms": metric.decision_graph_duration_ms if metric else 0.0,
+        "report_duration_ms": metric.report_duration_ms if metric else 0.0,
+        "documents_count": metric.documents_count if metric else 0,
+        "fields_count": metric.fields_count if metric else 0,
+        "citations_count": metric.citations_count if metric else 0,
+        "memory_mb": metric.memory_mb if metric else 0.0,
+        "created_at": metric.created_at.isoformat() if metric and metric.created_at else None,
+        "agent_logs": [
+            {
+                "agent_name": l.agent_name,
+                "started_at": l.started_at.isoformat() if l.started_at else None,
+                "completed_at": l.completed_at.isoformat() if l.completed_at else None,
+                "duration_ms": l.duration_ms,
+                "status": l.status,
+                "input_summary": json.loads(l.input_summary_json) if l.input_summary_json else None,
+                "output_summary": json.loads(l.output_summary_json) if l.output_summary_json else None,
+                "error_message": l.error_message
+            } for l in logs
+        ]
+    }
+

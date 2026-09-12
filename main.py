@@ -42,6 +42,12 @@ from agents.agent_5_risk.agent import RiskAnomalyDetectionAgent
 from agents.agent_6_report.agent import FinalReportDecisionAgent
 from agents.agent_6_report.pdf_exporter import build_pdf_report_bytes
 
+from telemetry.tracker import PipelineTelemetryTracker
+from eligibility.engine import evaluate_application_eligibility
+from decision_graph.builder import build_application_decision_graph
+from policy_kb.loader import seed_loan_policies, get_active_policy
+from policy_kb.definitions import ALL_LOAN_POLICIES, get_policy_definition
+
 from shared.policy import (
     DocumentRequirement,
     DocumentSlotStatus,
@@ -789,54 +795,131 @@ async def process_application_documents(application_id: str, db: Session = Depen
             "next_agent": "extraction_agent"
         })
 
+    # Initialize Telemetry Tracker
+    telemetry_tracker = PipelineTelemetryTracker(application_id, db)
+    status_obj = _build_application_status_db(application_id, db)
+
     # Agent 2 Extraction
     repos.update_processing_run(db, run_rec.id, "PROCESSING", "agent_2")
-    extraction_results = agent_2.process_batch(class_results)
-    for ext_res in extraction_results:
-        doc_id_val = ext_res.get("document_id")
-        if doc_id_val and str(doc_id_val).isdigit():
-            repos.save_extracted_fields(db, int(doc_id_val), ext_res.get("fields", {}))
+    with telemetry_tracker.track_agent("agent_2", {"document_count": len(class_results)}) as a2_holder:
+        extraction_results = agent_2.process_batch(class_results)
+        for ext_res in extraction_results:
+            doc_id_val = ext_res.get("document_id")
+            if doc_id_val and str(doc_id_val).isdigit():
+                repos.save_extracted_fields(db, int(doc_id_val), ext_res.get("fields", {}))
+        a2_holder["summary"] = {"extracted_documents": len(extraction_results)}
 
     # Agent 3 Validation
     repos.update_processing_run(db, run_rec.id, "PROCESSING", "agent_3")
-    validation_results = agent_3.process_batch(extraction_results)
-    repos.save_validation_results(db, application_id, validation_results)
+    with telemetry_tracker.track_agent("agent_3", {"document_count": len(extraction_results)}) as a3_holder:
+        validation_results = agent_3.process_batch(extraction_results)
+        repos.save_validation_results(db, application_id, validation_results)
+        a3_holder["summary"] = {"validation_items": len(validation_results)}
 
     # Agent 4 Cross-Document Verification
     repos.update_processing_run(db, run_rec.id, "PROCESSING", "agent_4")
-    cross_doc_res = agent_4.process(
-        validation_results,
-        loan_type=app_rec.loan_type,
-        application_id=application_id
-    )
-    repos.save_cross_document_findings(db, application_id, cross_doc_res.model_dump())
+    with telemetry_tracker.track_agent("agent_4", {"loan_type": app_rec.loan_type}) as a4_holder:
+        cross_doc_res = agent_4.process(
+            validation_results,
+            loan_type=app_rec.loan_type,
+            application_id=application_id
+        )
+        repos.save_cross_document_findings(db, application_id, cross_doc_res.model_dump())
+        a4_holder["summary"] = {"coverage": cross_doc_res.verification_coverage, "mismatches": cross_doc_res.mismatch_count}
 
     # Agent 5 Risk & Anomaly Detection Engine
     repos.update_processing_run(db, run_rec.id, "PROCESSING", "agent_5")
-    risk_res = agent_5.process(
-        cross_document_results=cross_doc_res,
-        validation_results=validation_results,
-        extraction_results=extraction_results,
-        classification_results=class_results,
-        loan_type=app_rec.loan_type,
-        application_id=application_id
-    )
-    repos.save_risk_assessment(db, application_id, risk_res.model_dump())
+    with telemetry_tracker.track_agent("agent_5", {"loan_type": app_rec.loan_type}) as a5_holder:
+        risk_res = agent_5.process(
+            cross_document_results=cross_doc_res,
+            validation_results=validation_results,
+            extraction_results=extraction_results,
+            classification_results=class_results,
+            loan_type=app_rec.loan_type,
+            application_id=application_id
+        )
+        repos.save_risk_assessment(db, application_id, risk_res.model_dump())
+        a5_holder["summary"] = {"risk_score": risk_res.risk_score, "risk_level": risk_res.risk_level}
+
+    # Retrieve Field Evidence Provenance
+    field_evidences = repos.get_field_evidence_by_application(db, application_id)
+    flat_extracted_fields = {}
+    for ext in extraction_results:
+        for fname, fval in ext.get("fields", {}).items():
+            if isinstance(fval, dict):
+                flat_extracted_fields[fname] = fval.get("value")
+            else:
+                flat_extracted_fields[fname] = fval
+
+    # Loan Eligibility Engine
+    with telemetry_tracker.track_agent("eligibility_engine", {"loan_type": app_rec.loan_type}) as el_holder:
+        eligibility_decision = evaluate_application_eligibility(
+            db=db,
+            application_id=application_id,
+            loan_type=app_rec.loan_type,
+            document_slots=status_obj.model_dump().get("slots", []),
+            extracted_fields=flat_extracted_fields,
+            validation_results=validation_results,
+            cross_document_findings=cross_doc_res.model_dump().get("findings", []),
+            risk_assessment=risk_res.model_dump(),
+            field_evidences=field_evidences
+        )
+        el_holder["summary"] = {
+            "decision": eligibility_decision.decision,
+            "rules_evaluated": eligibility_decision.rules_evaluated_count,
+            "rules_passed": eligibility_decision.rules_passed_count
+        }
+
+    # Evidence-Based Decision Graph
+    with telemetry_tracker.track_agent("decision_graph", {"loan_type": app_rec.loan_type}) as dg_holder:
+        decision_graph = build_application_decision_graph(
+            db=db,
+            application_id=application_id,
+            loan_type=app_rec.loan_type,
+            document_slots=status_obj.model_dump().get("slots", []),
+            classifications=class_results,
+            extracted_fields=flat_extracted_fields,
+            validation_results=validation_results,
+            cross_document_findings=cross_doc_res.model_dump().get("findings", []),
+            risk_assessment=risk_res.model_dump(),
+            eligibility_decision=eligibility_decision.dict(),
+            final_report=None,
+            field_evidences=field_evidences
+        )
+        dg_holder["summary"] = {
+            "total_nodes": decision_graph.total_nodes,
+            "passed_nodes": decision_graph.passed_nodes
+        }
 
     # Agent 6 Final Report & Decision Engine
     repos.update_processing_run(db, run_rec.id, "PROCESSING", "agent_6")
-    final_report = agent_6.process(
-        risk_assessment_results=risk_res,
-        cross_document_results=cross_doc_res,
-        validation_results=validation_results,
-        extraction_results=extraction_results,
-        classification_results=class_results,
-        loan_type=app_rec.loan_type,
-        application_id=application_id
-    )
-    repos.save_final_report(db, application_id, final_report.model_dump())
+    with telemetry_tracker.track_agent("agent_6", {"loan_type": app_rec.loan_type}) as a6_holder:
+        final_report = agent_6.process(
+            risk_assessment_results=risk_res,
+            cross_document_results=cross_doc_res,
+            validation_results=validation_results,
+            extraction_results=extraction_results,
+            classification_results=class_results,
+            loan_type=app_rec.loan_type,
+            application_id=application_id,
+            eligibility_decision=eligibility_decision.dict(),
+            field_evidences=field_evidences,
+            decision_graph=decision_graph.dict()
+        )
+        a6_holder["summary"] = {"final_decision": final_report.decision}
 
-    repos.update_processing_run(db, run_rec.id, "COMPLETED", "completed", total_time_ms=final_report.processing_time_ms)
+    # Finalize Telemetry & Persist
+    telemetry = telemetry_tracker.finalize(
+        documents_count=len(class_results),
+        fields_count=len(flat_extracted_fields),
+        citations_count=len(field_evidences)
+    )
+
+    final_report_dict = final_report.model_dump()
+    final_report_dict["telemetry_summary"] = telemetry.dict()
+    repos.save_final_report(db, application_id, final_report_dict)
+
+    repos.update_processing_run(db, run_rec.id, "COMPLETED", "completed", total_time_ms=telemetry.total_pipeline_duration_ms)
     repos.update_application_status(db, application_id, "COMPLETED")
 
     status_obj = _build_application_status_db(application_id, db)
@@ -852,11 +935,86 @@ async def process_application_documents(application_id: str, db: Session = Depen
         "cross_document_result": cross_doc_res.model_dump(),
         "risk_assessment_results": risk_res.model_dump(),
         "risk_result": risk_res.model_dump(),
-        "final_report_results": final_report.model_dump(),
-        "final_report": final_report.model_dump(),
+        "final_report_results": final_report_dict,
+        "final_report": final_report_dict,
+        "eligibility_results": eligibility_decision.dict(),
+        "eligibility_decision": eligibility_decision.dict(),
+        "decision_graph": decision_graph.dict(),
+        "telemetry": telemetry.dict(),
+        "field_evidence": field_evidences,
         "application_status": status_obj.model_dump(),
         "next_agent": "completed"
     })
+
+
+# =============================================================================
+# EXPLAINABILITY, POLICIES & TELEMETRY REST ENDPOINTS
+# =============================================================================
+
+@app.get("/api/applications/{application_id}/eligibility")
+async def get_application_eligibility_endpoint(application_id: str, db: Session = Depends(get_db)):
+    """Retrieves loan eligibility determination and rule evaluations for an application."""
+    el_res = repos.get_eligibility_by_application(db, application_id)
+    if not el_res:
+        raise HTTPException(status_code=404, detail=f"Eligibility assessment not found for application '{application_id}'.")
+    return JSONResponse(content=el_res)
+
+
+@app.get("/api/policies")
+async def list_loan_policies_endpoint(db: Session = Depends(get_db)):
+    """Lists all credit underwriting policies across the 10 loan types citing DEMO_POLICY provenance."""
+    policies = repos.list_all_policies(db)
+    if not policies:
+        # Fallback to in-memory definitions if DB not seeded
+        policies = ALL_LOAN_POLICIES
+    return JSONResponse(content={"policies": policies, "total_policies": len(policies)})
+
+
+@app.get("/api/policies/{loan_type}")
+async def get_loan_policy_by_type_endpoint(loan_type: str, db: Session = Depends(get_db)):
+    """Retrieves loan policy and underwriting rules for a specific loan type."""
+    pol = get_active_policy(db, loan_type)
+    if not pol:
+        raise HTTPException(status_code=404, detail=f"Policy not found for loan type '{loan_type}'.")
+    return JSONResponse(content=pol)
+
+
+@app.get("/api/applications/{application_id}/evidence")
+async def get_application_evidence_endpoint(application_id: str, db: Session = Depends(get_db)):
+    """Retrieves field-level evidence citations with snippets, page numbers, and PII masking."""
+    evidence = repos.get_field_evidence_by_application(db, application_id)
+    return JSONResponse(content={
+        "application_id": application_id,
+        "total_citations": len(evidence),
+        "evidence": evidence
+    })
+
+
+@app.get("/api/applications/{application_id}/decision-graph")
+async def get_application_decision_graph_endpoint(application_id: str, db: Session = Depends(get_db)):
+    """Retrieves the 11-stage evidence-based decision graph topology for an application."""
+    graph = repos.get_decision_graph_by_application(db, application_id)
+    if not graph:
+        raise HTTPException(status_code=404, detail=f"Decision graph not found for application '{application_id}'.")
+    return JSONResponse(content=graph)
+
+
+@app.get("/api/applications/{application_id}/telemetry")
+async def get_application_telemetry_endpoint(application_id: str, db: Session = Depends(get_db)):
+    """Retrieves execution telemetry, agent runtimes, and system performance metrics."""
+    telemetry = repos.get_telemetry_by_application(db, application_id)
+    if not telemetry:
+        raise HTTPException(status_code=404, detail=f"Telemetry metrics not found for application '{application_id}'.")
+    return JSONResponse(content=telemetry)
+
+
+@app.get("/api/applications/{application_id}/final-report")
+async def get_application_final_report_endpoint(application_id: str, db: Session = Depends(get_db)):
+    """Retrieves Agent 6 Final Underwriting Report for an application."""
+    rep = repos.get_final_report_by_application(db, application_id)
+    if not rep:
+        raise HTTPException(status_code=404, detail=f"Final report not found for application '{application_id}'.")
+    return JSONResponse(content=rep)
 
 
 # =============================================================================

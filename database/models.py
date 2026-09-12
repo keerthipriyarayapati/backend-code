@@ -31,6 +31,11 @@ class LoanApplication(Base):
     risk_assessments = relationship("RiskAssessmentModel", back_populates="application", cascade="all, delete-orphan")
     final_reports = relationship("FinalReportModel", back_populates="application", cascade="all, delete-orphan")
     processing_runs = relationship("ProcessingRunModel", back_populates="application", cascade="all, delete-orphan")
+    field_evidences = relationship("FieldEvidenceModel", back_populates="application", cascade="all, delete-orphan")
+    decision_graphs = relationship("DecisionGraphModel", back_populates="application", cascade="all, delete-orphan")
+    eligibility_results = relationship("EligibilityResultModel", back_populates="application", cascade="all, delete-orphan")
+    agent_execution_logs = relationship("AgentExecutionLogModel", back_populates="application", cascade="all, delete-orphan")
+    telemetry_metrics = relationship("TelemetryMetricsModel", back_populates="application", cascade="all, delete-orphan")
 
 
 class Applicant(Base):
@@ -256,3 +261,274 @@ class ProcessingRunModel(Base):
     total_processing_time_ms = Column(Float, default=0.0, nullable=False)
 
     application = relationship("LoanApplication", back_populates="processing_runs")
+
+
+# =============================================================================
+# 13. LOAN POLICIES & RULES
+# =============================================================================
+
+class LoanPolicyModel(Base):
+    """TABLE 13: loan_policies"""
+    __tablename__ = "loan_policies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(String(100), unique=True, index=True, nullable=False)
+    loan_type = Column(String(100), index=True, nullable=False)
+    policy_name = Column(String(200), nullable=False)
+    version = Column(String(50), default="1.0", nullable=False)
+    description = Column(Text, nullable=True)
+    effective_date = Column(String(50), nullable=True)
+    source_type = Column(String(50), default="DEMO_POLICY", nullable=False)
+    source_document = Column(String(200), nullable=True)
+    source_section = Column(String(100), nullable=True)
+    source_page = Column(Integer, nullable=True)
+    status = Column(String(50), default="ACTIVE", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    rules = relationship("PolicyRuleModel", back_populates="policy", cascade="all, delete-orphan")
+    required_documents = relationship("PolicyRequiredDocumentModel", back_populates="policy", cascade="all, delete-orphan")
+    required_fields = relationship("PolicyRequiredFieldModel", back_populates="policy", cascade="all, delete-orphan")
+
+
+class PolicyRuleModel(Base):
+    """TABLE 14: policy_rules"""
+    __tablename__ = "policy_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(String(100), unique=True, index=True, nullable=False)
+    policy_id = Column(String(100), ForeignKey("loan_policies.policy_id", ondelete="CASCADE"), nullable=False)
+    rule_code = Column(String(100), index=True, nullable=False)
+    category = Column(String(100), nullable=False)  # KYC, INCOME, AGE, PROPERTY, COLLATERAL, etc.
+    field_name = Column(String(100), nullable=True)
+    operator = Column(String(50), nullable=False)  # GTE, LTE, EQ, IN, EXISTS, MATCHES
+    expected_value = Column(String(200), nullable=True)
+    threshold_value = Column(Float, nullable=True)
+    severity = Column(String(50), default="CRITICAL", nullable=False)  # CRITICAL, HIGH, MEDIUM, LOW
+    mandatory = Column(Boolean, default=True, nullable=False)
+    error_message = Column(Text, nullable=True)
+    source_type = Column(String(50), default="DEMO_POLICY", nullable=False)
+    source_document = Column(String(200), nullable=True)
+    source_section = Column(String(100), nullable=True)
+    source_page = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    policy = relationship("LoanPolicyModel", back_populates="rules")
+
+
+class PolicyRequiredDocumentModel(Base):
+    """TABLE 15: policy_required_documents"""
+    __tablename__ = "policy_required_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(String(100), ForeignKey("loan_policies.policy_id", ondelete="CASCADE"), nullable=False)
+    loan_type = Column(String(100), nullable=False)
+    slot_id = Column(String(100), nullable=False)
+    document_type = Column(String(100), nullable=False)
+    display_name = Column(String(200), nullable=False)
+    required = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    policy = relationship("LoanPolicyModel", back_populates="required_documents")
+
+
+class PolicyRequiredFieldModel(Base):
+    """TABLE 16: policy_required_fields"""
+    __tablename__ = "policy_required_fields"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(String(100), ForeignKey("loan_policies.policy_id", ondelete="CASCADE"), nullable=False)
+    loan_type = Column(String(100), nullable=False)
+    document_type = Column(String(100), nullable=False)
+    field_name = Column(String(100), nullable=False)
+    required = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    policy = relationship("LoanPolicyModel", back_populates="required_fields")
+
+
+# =============================================================================
+# 17. FIELD EVIDENCE & CITATIONS
+# =============================================================================
+
+class FieldEvidenceModel(Base):
+    """TABLE 17: field_evidence"""
+    __tablename__ = "field_evidence"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evidence_id = Column(String(100), unique=True, index=True, nullable=False)
+    application_id = Column(String(100), ForeignKey("loan_applications.application_id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    slot_id = Column(String(100), nullable=True)
+    document_type = Column(String(100), nullable=True)
+    field_name = Column(String(100), nullable=False)
+    extracted_value = Column(Text, nullable=True)  # Masked if sensitive
+    raw_value = Column(Text, nullable=True)        # Masked if sensitive
+    normalized_value = Column(Text, nullable=True)
+    source_page = Column(Integer, default=1, nullable=False)
+    snippet = Column(Text, nullable=True)
+    bounding_box_json = Column(Text, nullable=True)
+    extraction_method = Column(String(100), default="Regex / Key-Value Extractor", nullable=False)
+    ocr_used = Column(Boolean, default=False, nullable=False)
+    confidence = Column(Float, default=1.0, nullable=False)
+    validation_status = Column(String(50), default="UNVALIDATED", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    application = relationship("LoanApplication", back_populates="field_evidences")
+
+
+# =============================================================================
+# 18. DECISION GRAPHS
+# =============================================================================
+
+class DecisionGraphModel(Base):
+    """TABLE 18: decision_graphs"""
+    __tablename__ = "decision_graphs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    graph_id = Column(String(100), unique=True, index=True, nullable=False)
+    application_id = Column(String(100), ForeignKey("loan_applications.application_id", ondelete="CASCADE"), nullable=False)
+    total_nodes = Column(Integer, default=0, nullable=False)
+    total_edges = Column(Integer, default=0, nullable=False)
+    passed_nodes = Column(Integer, default=0, nullable=False)
+    failed_nodes = Column(Integer, default=0, nullable=False)
+    warning_nodes = Column(Integer, default=0, nullable=False)
+    info_nodes = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    application = relationship("LoanApplication", back_populates="decision_graphs")
+    nodes = relationship("DecisionGraphNodeModel", back_populates="graph", cascade="all, delete-orphan")
+    edges = relationship("DecisionGraphEdgeModel", back_populates="graph", cascade="all, delete-orphan")
+
+
+class DecisionGraphNodeModel(Base):
+    """TABLE 19: decision_graph_nodes"""
+    __tablename__ = "decision_graph_nodes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    graph_id = Column(String(100), ForeignKey("decision_graphs.graph_id", ondelete="CASCADE"), nullable=False)
+    node_id = Column(String(100), nullable=False)
+    stage_name = Column(String(100), nullable=False)
+    label = Column(String(200), nullable=False)
+    status = Column(String(50), nullable=False)  # PASS, FAIL, WARNING, INFO
+    agent_name = Column(String(100), nullable=True)
+    description = Column(Text, nullable=True)
+    evidence_count = Column(Integer, default=0, nullable=False)
+    citation_count = Column(Integer, default=0, nullable=False)
+    node_metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    graph = relationship("DecisionGraphModel", back_populates="nodes")
+
+
+class DecisionGraphEdgeModel(Base):
+    """TABLE 20: decision_graph_edges"""
+    __tablename__ = "decision_graph_edges"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    graph_id = Column(String(100), ForeignKey("decision_graphs.graph_id", ondelete="CASCADE"), nullable=False)
+    source_node_id = Column(String(100), nullable=False)
+    target_node_id = Column(String(100), nullable=False)
+    edge_label = Column(String(100), nullable=True)
+    edge_type = Column(String(50), default="DIRECTED", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    graph = relationship("DecisionGraphModel", back_populates="edges")
+
+
+# =============================================================================
+# 21. ELIGIBILITY RESULTS & RULE RESULTS
+# =============================================================================
+
+class EligibilityResultModel(Base):
+    """TABLE 21: eligibility_results"""
+    __tablename__ = "eligibility_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    eligibility_id = Column(String(100), unique=True, index=True, nullable=False)
+    application_id = Column(String(100), ForeignKey("loan_applications.application_id", ondelete="CASCADE"), nullable=False)
+    loan_type = Column(String(100), nullable=False)
+    decision = Column(String(50), nullable=False)  # ELIGIBLE, NOT_ELIGIBLE, HUMAN_REVIEW_REQUIRED, INSUFFICIENT_EVIDENCE
+    confidence = Column(Float, default=1.0, nullable=False)
+    reasons_json = Column(Text, nullable=True)  # JSON array of reasons
+    rules_evaluated_count = Column(Integer, default=0, nullable=False)
+    rules_passed_count = Column(Integer, default=0, nullable=False)
+    rules_failed_count = Column(Integer, default=0, nullable=False)
+    rules_skipped_count = Column(Integer, default=0, nullable=False)
+    processing_time_ms = Column(Float, default=0.0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    application = relationship("LoanApplication", back_populates="eligibility_results")
+    rule_results = relationship("EligibilityRuleResultModel", back_populates="eligibility_result", cascade="all, delete-orphan")
+
+
+class EligibilityRuleResultModel(Base):
+    """TABLE 22: eligibility_rule_results"""
+    __tablename__ = "eligibility_rule_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    eligibility_id = Column(String(100), ForeignKey("eligibility_results.eligibility_id", ondelete="CASCADE"), nullable=False)
+    rule_code = Column(String(100), nullable=False)
+    category = Column(String(100), nullable=False)
+    field_name = Column(String(100), nullable=True)
+    operator = Column(String(50), nullable=False)
+    expected_value = Column(String(200), nullable=True)
+    actual_value = Column(String(200), nullable=True)
+    status = Column(String(50), nullable=False)  # PASS, FAIL, SKIPPED, INSUFFICIENT_EVIDENCE
+    mandatory = Column(Boolean, default=True, nullable=False)
+    severity = Column(String(50), default="CRITICAL", nullable=False)
+    failure_reason = Column(Text, nullable=True)
+    evidence_id = Column(String(100), nullable=True)
+    policy_rule_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    eligibility_result = relationship("EligibilityResultModel", back_populates="rule_results")
+
+
+# =============================================================================
+# 23. AGENT EXECUTION LOGS & TELEMETRY
+# =============================================================================
+
+class AgentExecutionLogModel(Base):
+    """TABLE 23: agent_execution_logs"""
+    __tablename__ = "agent_execution_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    application_id = Column(String(100), ForeignKey("loan_applications.application_id", ondelete="CASCADE"), nullable=False)
+    agent_name = Column(String(100), nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Float, default=0.0, nullable=False)
+    status = Column(String(50), default="SUCCESS", nullable=False)
+    input_summary_json = Column(Text, nullable=True)
+    output_summary_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    application = relationship("LoanApplication", back_populates="agent_execution_logs")
+
+
+class TelemetryMetricsModel(Base):
+    """TABLE 24: telemetry_metrics"""
+    __tablename__ = "telemetry_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    application_id = Column(String(100), ForeignKey("loan_applications.application_id", ondelete="CASCADE"), nullable=False)
+    total_pipeline_duration_ms = Column(Float, default=0.0, nullable=False)
+    agent_durations_json = Column(Text, nullable=True)  # JSON dict of agent durations
+    ocr_duration_ms = Column(Float, default=0.0, nullable=False)
+    validation_duration_ms = Column(Float, default=0.0, nullable=False)
+    cross_doc_duration_ms = Column(Float, default=0.0, nullable=False)
+    risk_duration_ms = Column(Float, default=0.0, nullable=False)
+    eligibility_duration_ms = Column(Float, default=0.0, nullable=False)
+    decision_graph_duration_ms = Column(Float, default=0.0, nullable=False)
+    report_duration_ms = Column(Float, default=0.0, nullable=False)
+    documents_count = Column(Integer, default=0, nullable=False)
+    fields_count = Column(Integer, default=0, nullable=False)
+    citations_count = Column(Integer, default=0, nullable=False)
+    memory_mb = Column(Float, default=0.0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    application = relationship("LoanApplication", back_populates="telemetry_metrics")
+
